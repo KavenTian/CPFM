@@ -1,0 +1,4 @@
+*.pth
+*.pyc
+.vscode
+mmdet.egg-info/
