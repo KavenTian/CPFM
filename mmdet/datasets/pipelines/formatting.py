@@ -229,10 +229,15 @@ class DefaultFormatBundle:
             img = np.ascontiguousarray(img.transpose(2, 0, 1))
             results['img'] = DC(
                 to_tensor(img), padding_value=self.pad_val['img'], stack=True)
-        for key in ['proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels']:
-            if key not in results:
-                continue
-            results[key] = DC(to_tensor(results[key]))
+        # for key in ['proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels']:
+        #     if key not in results:
+        #         continue
+        #     results[key] = DC(to_tensor(results[key]))
+        for key in ['gt_bboxes', 'gt_labels', 'local_person_ids']:
+            results[key+'_rgb'] = DC(to_tensor(results[key][0]))
+            results[key+'_tir'] = DC(to_tensor(results[key][1]))
+            results[key+'_union'] = DC(to_tensor(results[key][2]))
+        
         if 'gt_masks' in results:
             results['gt_masks'] = DC(
                 results['gt_masks'],

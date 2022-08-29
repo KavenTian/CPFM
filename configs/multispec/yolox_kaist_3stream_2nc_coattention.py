@@ -48,25 +48,26 @@ model = dict(
         ]
     ),
     
-    neck=dict(
-        type='YOLOXPAFPN', #neck的类别，见mmdet/models/neck/
-        in_channels=[256*2, 512*2, 1024*2],
-        out_channels=256*2,
-        num_csp_blocks=1,
-    ),
-    
     feature_fusion_module=dict(
         type='ModalFusion',    #特征融合模块
         in_channels=[256, 512, 1024],
-        out_channels=[256*2, 512*2, 1024*2],
+        out_channels=[256*2, 512*2, 1024*2],    # double channel
     ),
-    
+       
+    neck=dict(
+        type='YOLOXPAFPN', #neck的类别，见mmdet/models/neck/
+        in_channels=[256*2, 512*2, 1024*2],   # double channel
+        out_channels=256*2,
+        num_csp_blocks=1,
+    ),
+
     bbox_head=dict(
-        type='YOLOXHead',
+        type='MultiSpeHead',
+        use_cls_branch=True, #需要修改loss装饰器!
         num_classes=1,
         in_channels=256*2,
         stacked_convs=4,
-        feat_channels=256*2,
+        feat_channels=256,  # double channel
         
     ),
     init_cfg=dict(type='Pretrained', checkpoint='checkpoints/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth'),
@@ -93,15 +94,22 @@ optimizer=dict(type='SGD', lr=0.01, weight_decay=0.0005,momentum=0.9,
 optimizer_config = dict(
     grad_clip=None  #梯度限制（大多数方法不使用）
 )
+# lr_config = dict(
+#     policy='YOLOX',
+#     warmup='exp',
+#     by_epoch=False,
+#     warmup_by_epoch=True,
+#     warmup_ratio=1,
+#     warmup_iters=3,  # 5 epoch
+#     num_last_epochs=2,
+#     min_lr_ratio=0.05)
 lr_config = dict(
-    policy='YOLOX',
-    warmup='exp',
-    by_epoch=False,
+    policy='step',
+    warmup='linear',
     warmup_by_epoch=True,
-    warmup_ratio=1,
-    warmup_iters=3,  # 5 epoch
-    num_last_epochs=2,
-    min_lr_ratio=0.05)
+    warmup_ratio=0.0001,
+    warmup_iters=2,
+    step=13)
 
 # TODO:数据集需自定义--定义如何处理标注信息
 dataset_type = 'KaistDataset'   #数据集类型，考虑此处自定义dataloader
@@ -139,19 +147,26 @@ train_pipeline = [
     dict(type='Resize_Multi',img_scale=img_scale, keep_ratio=True),
     # dict(type='Pad', pad_to_square=True, pad_val=114.0),
     dict(type='Normalize', **img_norm_cfg),
+    dict(type='UnionBox'),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])
+    dict(type='Collect', keys=[ 'img',
+                                'gt_bboxes_rgb', 'gt_bboxes_tir', 'gt_bboxes_union',
+                                'gt_labels_rgb', 'gt_labels_tir', 'gt_labels_union',
+                                'local_person_ids_rgb',
+                                'local_person_ids_tir',
+                                'local_person_ids_union',
+                                'people_num'])
 ]
 
 train_dataset = dict(
     type='MultiImageMixDataset',
     dataset=dict(
-        type='KaistDataset',
-        ann_file='/dataset/KAIST/coco_kaist/annotations/train.json',
-        img_prefix='/dataset/KAIST/coco_kaist/train/',
+        type='GneralKaist',
+        ann_file='/data/kaist-paired/annotations/id_paired_annotations/train.json',
+        img_prefix='/data/kaist_dataset',
         pipeline=[
             dict(type='LoadMultiModalImageFromFiles', to_float32=True),
-            dict(type='LoadAnnotations', with_bbox=True)
+            dict(type='LoadAnnotations', poly2mask=False)
         ],
         # filter_empty_gt=True,
     ),
@@ -159,7 +174,7 @@ train_dataset = dict(
     # dynamic_scale=img_scale
 )
 
-# TODO:测试的流程
+# TODO:测试的流程1
 test_pipeline = [
     dict(type='LoadMultiModalImageFromFiles'), #prog.1:从文件路径加载图像
     # dict(type='LoadAnnotations', with_bbox=True),  #prog.2:对于加载的图像加载其标注信息
@@ -183,20 +198,20 @@ test_pipeline = [
 # TODO:dataloader需自定义
 
 data = dict(
-    samples_per_gpu=1,  #单个gpu的batch size
+    samples_per_gpu=2,  #单个gpu的batch size
     workers_per_gpu=2,  #单个gpu分配的数据加载线程数
     train=train_dataset,
     val = dict(
-        type='KaistDataset', #数据集的类型，同上train
-        ann_file='/dataset/KAIST/coco_kaist/annotations/val.json',
-        img_prefix='/dataset/KAIST/coco_kaist/val/',
+        type='GneralKaist', #数据集的类型，同上train
+        ann_file='/data/kaist-paired/annotations/id_paired_annotations/test.json',
+        img_prefix='/data/kaist_dataset',
         pipeline=test_pipeline,
         
     ),
     test = dict(
-        type='KaistDataset', #数据集的类型，同上train
-        ann_file='/dataset/KAIST/coco_kaist/annotations/val.json',
-        img_prefix='/dataset/KAIST/coco_kaist/val/',
+        type='GneralKaist', #数据集的类型，同上train
+        ann_file='/data/kaist-paired/annotations/id_paired_annotations/test.json',
+        img_prefix='/data/kaist_dataset',
         pipeline=test_pipeline,
         
     )
@@ -206,7 +221,7 @@ data = dict(
 
 runner = dict(
     type='EpochBasedRunner',    #runner的类别
-    max_epochs=24
+    max_epochs=15
 )
 
 # find_unused_parameters=True
@@ -228,7 +243,7 @@ load_from = None    #从给定路径里加载模型作为预训练模型
 interval = 1
 resume_from = None  #从给定路径恢复checkpoints，训练模式将从checkpoints保存的位置开始训练
 # workflow = [('train', 1)]   #runner的工作流程，表示只有一个工作流且仅执行一次（根据前面的max_epochs训练12个回合）
-workdir = 'outputs' #用于保存当前实验的模型checkpoint和log文件的地址
+# work_dir = 'outputs' #用于保存当前实验的模型checkpoint和log文件的地址
 
 evaluation = dict(
     interval=interval, #验证间隔
@@ -240,7 +255,7 @@ checkpoint_config = dict(
 )
 
 custom_hooks = [
-    dict(type='YOLOXModeSwitchHook', num_last_epochs=9, priority=48),
+    dict(type='YOLOXModeSwitchHook', num_last_epochs=2, priority=48),
     # dict(
     #     type='SyncRandomSizeHook',
     #     ratio_range=(14, 26),
@@ -249,7 +264,7 @@ custom_hooks = [
     #     priority=48),
     dict(
         type='SyncNormHook',
-        num_last_epochs=9,
+        num_last_epochs=2,
         interval=interval,
         priority=48),
     dict(type='ExpMomentumEMAHook', resume_from=resume_from, priority=49)

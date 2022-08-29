@@ -2,6 +2,7 @@
 import copy
 import inspect
 import math
+from unittest import result
 import warnings
 
 import cv2
@@ -549,11 +550,15 @@ class Resize_Multi:
     def _resize_bboxes(self, results):
         """Resize bounding boxes with ``results['scale_factor']``."""
         for key in results.get('bbox_fields', []):
-            bboxes = results[key] * results['scale_factor']
-            if self.bbox_clip_border:
-                img_shape = results['img_shape']
-                bboxes[:, 0::2] = np.clip(bboxes[:, 0::2], 0, img_shape[1])
-                bboxes[:, 1::2] = np.clip(bboxes[:, 1::2], 0, img_shape[0])
+            bboxes = results[key]
+            def get_bbox(bboxes):
+                bboxes = bboxes * results['scale_factor']
+                if self.bbox_clip_border:
+                    img_shape = results['img_shape']
+                    bboxes[:, 0::2] = np.clip(bboxes[:, 0::2], 0, img_shape[1])
+                    bboxes[:, 1::2] = np.clip(bboxes[:, 1::2], 0, img_shape[0])
+                return bboxes
+            bboxes = list(map(get_bbox, bboxes))
             results[key] = bboxes
 
     def _resize_masks(self, results):
@@ -774,9 +779,8 @@ class RandomFlip:
                     results[key], direction=results['flip_direction'])
             # flip bboxes
             for key in results.get('bbox_fields', []):
-                results[key] = self.bbox_flip(results[key],
-                                              results['img_shape'],
-                                              results['flip_direction'])
+                f = lambda bb: self.bbox_flip(bb, results['img_shape'],results['flip_direction'])
+                results[key] = list(map(f, results[key]))
             # flip masks
             for key in results.get('mask_fields', []):
                 results[key] = results[key].flip(results['flip_direction'])
@@ -1362,9 +1366,11 @@ class PhotoMetricDistortion:
                 img *= alpha
 
         # randomly swap channels
-        if ch <= 3:
-            if random.randint(2):
-                img = img[..., random.permutation(3)]
+        if random.randint(2):
+            if ch <= 3:    
+                    img = img[..., random.permutation(3)]
+            elif ch == 6:
+                    img = img[..., np.concatenate((random.permutation(3), np.array([3,4,5])), 0)]
 
         results['img'] = img 
         return results
@@ -2390,6 +2396,7 @@ class Mosaic:
         assert 'mix_results' in results
         mosaic_labels = []
         mosaic_bboxes = []
+        mosaic_local_person_ids = []
         if hasattr(results, 'illumination'):
             mosaic_illu = []
         else:
@@ -2440,49 +2447,81 @@ class Mosaic:
             # adjust coordinate
             gt_bboxes_i = results_patch['gt_bboxes']
             gt_labels_i = results_patch['gt_labels']
+            local_person_ids = results_patch['local_person_ids']
             if mosaic_illu is not None:
                 gt_illu_i = results_patch['gt_illumination']
 
-
-            if gt_bboxes_i.shape[0] > 0:
-                padw = x1_p - x1_c
-                padh = y1_p - y1_c
-                gt_bboxes_i[:, 0::2] = \
-                    scale_ratio_i * gt_bboxes_i[:, 0::2] + padw
-                gt_bboxes_i[:, 1::2] = \
-                    scale_ratio_i * gt_bboxes_i[:, 1::2] + padh
+            assert len(gt_bboxes_i) == 2
+            for i in [0, 1]:
+                if gt_bboxes_i[i].shape[0] > 0:    # bbox exist
+                    padw = x1_p - x1_c
+                    padh = y1_p - y1_c
+                    gt_bboxes_i[i][:, 0::2] = \
+                        scale_ratio_i * gt_bboxes_i[i][:, 0::2] + padw # get new bbox in 2x mosac_image
+                    gt_bboxes_i[i][:, 1::2] = \
+                        scale_ratio_i * gt_bboxes_i[i][:, 1::2] + padh
 
             mosaic_bboxes.append(gt_bboxes_i)
             mosaic_labels.append(gt_labels_i)
+            mosaic_local_person_ids.append(local_person_ids)
             if mosaic_illu is not None:
                 mosaic_illu.append(gt_illu_i)
 
-        if len(mosaic_labels) > 0:
-            mosaic_bboxes = np.concatenate(mosaic_bboxes, 0)
-            mosaic_labels = np.concatenate(mosaic_labels, 0)
-            if mosaic_illu is not None:
-                mosaic_illu = np.concatenate(mosaic_illu, 0)
+        people_num = 0
+        for i, local_person_ids in enumerate(mosaic_local_person_ids):
+            rgb_ids, tir_ids = local_person_ids
+            rgb_ids += people_num
+            tir_ids += people_num
+            people_num += len(set(np.concatenate(local_person_ids, axis=0).tolist()))
+            mosaic_local_person_ids[i] = [rgb_ids, tir_ids]
 
-            if self.bbox_clip_border:
+        mosaic_bboxes = [np.concatenate([item[0] for item in mosaic_bboxes], 0),\
+                            np.concatenate([item[1] for item in mosaic_bboxes], 0)]
+        mosaic_labels = [np.concatenate([item[0] for item in mosaic_labels], 0),\
+                            np.concatenate([item[1] for item in mosaic_labels], 0)]
+        mosaic_local_person_ids = [np.concatenate([item[0] for item in mosaic_local_person_ids], 0),\
+                            np.concatenate([item[1] for item in mosaic_local_person_ids], 0)]
+        if mosaic_illu is not None:
+            mosaic_illu = [np.concatenate([item[0] for item in mosaic_illu], 0),\
+                            np.concatenate([item[1] for item in mosaic_illu], 0)]
+
+        if self.bbox_clip_border:
+            def box_clip(mosaic_bboxes):
                 mosaic_bboxes[:, 0::2] = np.clip(mosaic_bboxes[:, 0::2], 0,
-                                                 2 * self.img_scale[1])
+                                                2 * self.img_scale[1])
                 mosaic_bboxes[:, 1::2] = np.clip(mosaic_bboxes[:, 1::2], 0,
-                                                 2 * self.img_scale[0])
+                                                2 * self.img_scale[0])
+                return mosaic_bboxes
+            mosaic_bboxes = list(map(box_clip, mosaic_bboxes))
 
-            if not self.skip_filter:
-                mosaic_bboxes, mosaic_labels = \
-                    self._filter_box_candidates(mosaic_bboxes, mosaic_labels)
+        if not self.skip_filter:    # False
+            mosaic_bboxes, mosaic_labels = \
+                self._filter_box_candidates(mosaic_bboxes, mosaic_labels)
 
         # remove outside bboxes
-        inside_inds = find_inside_bboxes(mosaic_bboxes, 2 * self.img_scale[0],
+        rgb_inside_inds = find_inside_bboxes(mosaic_bboxes[0], 2 * self.img_scale[0],
                                          2 * self.img_scale[1])
-        mosaic_bboxes = mosaic_bboxes[inside_inds]
-        mosaic_labels = mosaic_labels[inside_inds]
+        tir_inside_inds = find_inside_bboxes(mosaic_bboxes[1], 2 * self.img_scale[0],
+                                         2 * self.img_scale[1])
+        
+        mosaic_bboxes = [mosaic_bboxes[0][rgb_inside_inds], mosaic_bboxes[1][tir_inside_inds]]
+        mosaic_labels = [mosaic_labels[0][rgb_inside_inds], mosaic_labels[1][tir_inside_inds]]
+        mosaic_local_person_ids = [mosaic_local_person_ids[0][rgb_inside_inds],\
+                                    mosaic_local_person_ids[1][tir_inside_inds]]
+
+        person_ids = sorted(list(set(np.concatenate(mosaic_local_person_ids, 0).tolist())))
+        new_id_dict = {id:i for i, id in enumerate(person_ids)}
+        def update_id(id_array):
+            for i in range(id_array.shape[0]):
+                id_array[i] = new_id_dict[id_array[i]]
+            return id_array
+        mosaic_local_person_ids = list(map(update_id, mosaic_local_person_ids))
 
         results['img'] = mosaic_img
         results['img_shape'] = mosaic_img.shape
         results['gt_bboxes'] = mosaic_bboxes
         results['gt_labels'] = mosaic_labels
+        results['local_person_ids'] = mosaic_local_person_ids
         if mosaic_illu is not None:
             results['gt_illumination'] = mosaic_illu
 
@@ -2699,7 +2738,8 @@ class MixUp:
         assert len(
             results['mix_results']) == 1, 'MixUp only support 2 images now !'
 
-        if results['mix_results'][0]['gt_bboxes'].shape[0] == 0:
+        if results['mix_results'][0]['gt_bboxes'][0].shape[0] == 0 and \
+            results['mix_results'][0]['gt_bboxes'][1].shape[0] == 0:
             # empty bbox
             return results
 
@@ -2755,56 +2795,89 @@ class MixUp:
 
         # 6. adjust bbox
         retrieve_gt_bboxes = retrieve_results['gt_bboxes']
-        retrieve_gt_bboxes[:, 0::2] = retrieve_gt_bboxes[:, 0::2] * scale_ratio
-        retrieve_gt_bboxes[:, 1::2] = retrieve_gt_bboxes[:, 1::2] * scale_ratio
-        if self.bbox_clip_border:
-            retrieve_gt_bboxes[:, 0::2] = np.clip(retrieve_gt_bboxes[:, 0::2],
-                                                  0, origin_w)
-            retrieve_gt_bboxes[:, 1::2] = np.clip(retrieve_gt_bboxes[:, 1::2],
-                                                  0, origin_h)
-
-        if is_filp:
-            retrieve_gt_bboxes[:, 0::2] = (
-                origin_w - retrieve_gt_bboxes[:, 0::2][:, ::-1])
+        def get_bbox(retrieve_gt_bboxes):
+            if retrieve_gt_bboxes.shape[0] == 0:
+                return retrieve_gt_bboxes
+            retrieve_gt_bboxes[:, 0::2] = retrieve_gt_bboxes[:, 0::2] * scale_ratio
+            retrieve_gt_bboxes[:, 1::2] = retrieve_gt_bboxes[:, 1::2] * scale_ratio
+            if self.bbox_clip_border:
+                retrieve_gt_bboxes[:, 0::2] = np.clip(retrieve_gt_bboxes[:, 0::2],
+                                                    0, origin_w)
+                retrieve_gt_bboxes[:, 1::2] = np.clip(retrieve_gt_bboxes[:, 1::2],
+                                                    0, origin_h)
+            if is_filp:
+                retrieve_gt_bboxes[:, 0::2] = (
+                    origin_w - retrieve_gt_bboxes[:, 0::2][:, ::-1])
+            return retrieve_gt_bboxes
+        retrieve_gt_bboxes = list(map(get_bbox, retrieve_gt_bboxes))
 
         # 7. filter
         cp_retrieve_gt_bboxes = retrieve_gt_bboxes.copy()
-        cp_retrieve_gt_bboxes[:, 0::2] = \
-            cp_retrieve_gt_bboxes[:, 0::2] - x_offset
-        cp_retrieve_gt_bboxes[:, 1::2] = \
-            cp_retrieve_gt_bboxes[:, 1::2] - y_offset
-        if self.bbox_clip_border:
-            cp_retrieve_gt_bboxes[:, 0::2] = np.clip(
-                cp_retrieve_gt_bboxes[:, 0::2], 0, target_w)
-            cp_retrieve_gt_bboxes[:, 1::2] = np.clip(
-                cp_retrieve_gt_bboxes[:, 1::2], 0, target_h)
+        def get_filtered(cp_retrieve_gt_bboxes):
+            if cp_retrieve_gt_bboxes.shape[0] == 0:
+                return cp_retrieve_gt_bboxes          
+            cp_retrieve_gt_bboxes[:, 0::2] = \
+                cp_retrieve_gt_bboxes[:, 0::2] - x_offset
+            cp_retrieve_gt_bboxes[:, 1::2] = \
+                cp_retrieve_gt_bboxes[:, 1::2] - y_offset
+            if self.bbox_clip_border:
+                cp_retrieve_gt_bboxes[:, 0::2] = np.clip(
+                    cp_retrieve_gt_bboxes[:, 0::2], 0, target_w)
+                cp_retrieve_gt_bboxes[:, 1::2] = np.clip(
+                    cp_retrieve_gt_bboxes[:, 1::2], 0, target_h)
+            return cp_retrieve_gt_bboxes
+        cp_retrieve_gt_bboxes = list(map(get_filtered, cp_retrieve_gt_bboxes))
 
         # 8. mix up
         ori_img = ori_img.astype(np.float32)
         mixup_img = 0.5 * ori_img + 0.5 * padded_cropped_img.astype(np.float32)
 
         retrieve_gt_labels = retrieve_results['gt_labels']
-        if not self.skip_filter:
+        if not self.skip_filter: # False
             keep_list = self._filter_box_candidates(retrieve_gt_bboxes.T,
                                                     cp_retrieve_gt_bboxes.T)
 
             retrieve_gt_labels = retrieve_gt_labels[keep_list]
             cp_retrieve_gt_bboxes = cp_retrieve_gt_bboxes[keep_list]
 
-        mixup_gt_bboxes = np.concatenate(
-            (results['gt_bboxes'], cp_retrieve_gt_bboxes), axis=0)
-        mixup_gt_labels = np.concatenate(
-            (results['gt_labels'], retrieve_gt_labels), axis=0)
+        
+        mixup_gt_bboxes = [np.concatenate((results['gt_bboxes'][0], cp_retrieve_gt_bboxes[0]), axis=0),\
+                            np.concatenate((results['gt_bboxes'][1], cp_retrieve_gt_bboxes[1]), axis=0)]
+        mixup_gt_labels = [np.concatenate((results['gt_labels'][0], retrieve_gt_labels[0]), axis=0),\
+                            np.concatenate((results['gt_labels'][1], retrieve_gt_labels[1]), axis=0)]
+        
+        mixup_gt_person_ids = [results['local_person_ids'], retrieve_results['local_person_ids']]
+        people_num = 0
+        for i, local_person_ids in enumerate(mixup_gt_person_ids):
+            rgb_ids, tir_ids = local_person_ids
+            rgb_ids += people_num
+            tir_ids += people_num
+            people_num += len(list(set(np.concatenate(local_person_ids, 0).tolist())))
+            mixup_gt_person_ids[i] = [rgb_ids, tir_ids]
+       
+        mixup_gt_person_ids = [np.concatenate([mixup_gt_person_ids[0][0], mixup_gt_person_ids[1][0]], 0),\
+                            np.concatenate([mixup_gt_person_ids[0][1], mixup_gt_person_ids[1][1]], 0)]
 
         # remove outside bbox
-        inside_inds = find_inside_bboxes(mixup_gt_bboxes, target_h, target_w)
-        mixup_gt_bboxes = mixup_gt_bboxes[inside_inds]
-        mixup_gt_labels = mixup_gt_labels[inside_inds]
+        f = lambda mixup_gt_bboxes: find_inside_bboxes(mixup_gt_bboxes, target_h, target_w)
+        inside_inds = list(map(f, mixup_gt_bboxes))
+        mixup_gt_bboxes = [mixup_gt_bboxes[0][inside_inds[0]], mixup_gt_bboxes[1][inside_inds[1]]]
+        mixup_gt_labels = [mixup_gt_labels[0][inside_inds[0]], mixup_gt_labels[1][inside_inds[1]]]
+        mixup_gt_person_ids = [mixup_gt_person_ids[0][inside_inds[0]], mixup_gt_person_ids[1][inside_inds[1]]]
+
+        person_ids = sorted(list(set(np.concatenate(mixup_gt_person_ids, 0).tolist())))
+        new_id_dict = {id:i for i, id in enumerate(person_ids)}
+        def update_id(id_array):
+            for i in range(id_array.shape[0]):
+                id_array[i] = new_id_dict[id_array[i]]
+            return id_array
+        mixup_gt_person_ids = list(map(update_id, mixup_gt_person_ids))
 
         results['img'] = mixup_img.astype(np.uint8)
         results['img_shape'] = mixup_img.shape
         results['gt_bboxes'] = mixup_gt_bboxes
         results['gt_labels'] = mixup_gt_labels
+        results['local_person_ids'] = mixup_gt_person_ids
 
         return results
 
@@ -2946,45 +3019,69 @@ class RandomAffine:
 
         for key in results.get('bbox_fields', []):
             bboxes = results[key]
-            num_bboxes = len(bboxes)
-            if num_bboxes:
-                # homogeneous coordinates
-                xs = bboxes[:, [0, 0, 2, 2]].reshape(num_bboxes * 4)
-                ys = bboxes[:, [1, 3, 3, 1]].reshape(num_bboxes * 4)
-                ones = np.ones_like(xs)
-                points = np.vstack([xs, ys, ones])
+            if bboxes[0].shape[0] == 0 and bboxes[1].shape[0] == 0:
+                continue
+            def get_bbox(bboxes):
+                num_bboxes = len(bboxes)
+                if num_bboxes:
+                    # homogeneous coordinates
+                    xs = bboxes[:, [0, 0, 2, 2]].reshape(num_bboxes * 4)
+                    ys = bboxes[:, [1, 3, 3, 1]].reshape(num_bboxes * 4)
+                    ones = np.ones_like(xs)
+                    points = np.vstack([xs, ys, ones])
 
-                warp_points = warp_matrix @ points
-                warp_points = warp_points[:2] / warp_points[2]
-                xs = warp_points[0].reshape(num_bboxes, 4)
-                ys = warp_points[1].reshape(num_bboxes, 4)
+                    warp_points = warp_matrix @ points
+                    warp_points = warp_points[:2] / warp_points[2]
+                    xs = warp_points[0].reshape(num_bboxes, 4)
+                    ys = warp_points[1].reshape(num_bboxes, 4)
 
-                warp_bboxes = np.vstack(
-                    (xs.min(1), ys.min(1), xs.max(1), ys.max(1))).T
+                    warp_bboxes = np.vstack(
+                        (xs.min(1), ys.min(1), xs.max(1), ys.max(1))).T
 
-                if self.bbox_clip_border:
-                    warp_bboxes[:, [0, 2]] = \
-                        warp_bboxes[:, [0, 2]].clip(0, width)
-                    warp_bboxes[:, [1, 3]] = \
-                        warp_bboxes[:, [1, 3]].clip(0, height)
+                    if self.bbox_clip_border:
+                        warp_bboxes[:, [0, 2]] = \
+                            warp_bboxes[:, [0, 2]].clip(0, width)
+                        warp_bboxes[:, [1, 3]] = \
+                            warp_bboxes[:, [1, 3]].clip(0, height)
+                else:
+                    return bboxes
+                return warp_bboxes
+            
+            warp_bboxes = list(map(get_bbox, bboxes))
 
-                # remove outside bbox
-                valid_index = find_inside_bboxes(warp_bboxes, height, width)
-                if not self.skip_filter:
-                    # filter bboxes
-                    filter_index = self.filter_gt_bboxes(
-                        bboxes * scaling_ratio, warp_bboxes)
-                    valid_index = valid_index & filter_index
+            # remove outside bbox
+            f = lambda warp_bboxes: find_inside_bboxes(warp_bboxes, height, width)
+            valid_index = list(map(f, warp_bboxes)) # get valid inds in 2 modals
 
-                results[key] = warp_bboxes[valid_index]
-                if key in ['gt_bboxes']:
-                    if 'gt_labels' in results:
-                        results['gt_labels'] = results['gt_labels'][
-                            valid_index]
+            if not self.skip_filter:
+                # filter bboxes
+                f = lambda warp_bboxes: self.filter_gt_bboxes(bboxes * scaling_ratio, warp_bboxes)
+                filter_index = list(map(f, warp_bboxes))
+                valid_index = [valid_index[0] & filter_index[0], valid_index[1] & filter_index[1]]
 
-                if 'gt_masks' in results:
-                    raise NotImplementedError(
-                        'RandomAffine only supports bbox.')
+            results[key] = [warp_bboxes[0][valid_index[0]], warp_bboxes[1][valid_index[1]]]
+            
+            if key in ['gt_bboxes']:
+                if 'gt_labels' in results:
+                    results['gt_labels'] = [results['gt_labels'][0][valid_index[0]],\
+                                            results['gt_labels'][1][valid_index[1]]]
+                
+                if 'local_person_ids' in results:
+                    valid_local_person_ids = [results['local_person_ids'][0][valid_index[0]],\
+                                            results['local_person_ids'][1][valid_index[1]]]
+                    
+                    person_ids = sorted(list(set(np.concatenate(valid_local_person_ids, 0).tolist())))
+                    new_id_dict = {id:i for i, id in enumerate(person_ids)}
+                    def update_id(id_array):
+                        for i in range(id_array.shape[0]):
+                            id_array[i] = new_id_dict[id_array[i]]
+                        return id_array
+                    affine_local_person_ids = list(map(update_id, valid_local_person_ids))
+                    results['local_person_ids'] = affine_local_person_ids
+
+            if 'gt_masks' in results:
+                raise NotImplementedError(
+                    'RandomAffine only supports bbox.')
         return results
 
     def filter_gt_bboxes(self, origin_bboxes, wrapped_bboxes):

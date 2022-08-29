@@ -256,19 +256,19 @@ class LoadMultiModalImageFromFiles:
         if "height" not in results['img_info']:
             is_demo = True
             img_bytes = self.file_client.get(filename[0])
-            img_vis = imfrombytes(img_bytes, flag='color')
+            img_rgb = imfrombytes(img_bytes, flag='color')
 
             img_bytes = self.file_client.get(filename[1])
-            img_inf = mmcv.imfrombytes(img_bytes, flag='color')
-            if img_vis.shape == img_inf.shape:
-                h, w, c = img_vis.shape
+            img_tir = mmcv.imfrombytes(img_bytes, flag='color')
+            if img_rgb.shape == img_tir.shape:
+                h, w, c = img_rgb.shape
                 img = np.zeros(shape=(h, w, c*2), dtype=np.float32)
-                img[:, :, 0:3] = img_vis
-                img[:, :, 3:] = img_inf
+                img[:, :, 0:3] = img_rgb
+                img[:, :, 3:] = img_tir
             else:
                 img = np.zeros(shape=(640, 640, 6), dtype=np.float32)
-                img[:, :, 0:3] = img_vis.resize((640, 640))
-                img[:, :, 3:] = img_inf.resize((640, 640))
+                img[:, :, 0:3] = img_rgb.resize((640, 640))
+                img[:, :, 3:] = img_tir.resize((640, 640))
         else:
             img_shape = (results['img_info']['height'], results['img_info']['width'], 6)
             img = np.zeros(shape=img_shape, dtype=np.float32)
@@ -365,6 +365,7 @@ class LoadAnnotations:
 
         ann_info = results['ann_info']
         results['gt_bboxes'] = ann_info['bboxes'].copy()
+        results['local_person_ids'] = ann_info['local_person_ids'].copy()
 
         if self.denorm_bbox:
             h, w = results['img_shape'][:2]

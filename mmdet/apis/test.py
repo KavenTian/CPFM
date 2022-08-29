@@ -18,7 +18,8 @@ def single_gpu_test(model,
                     data_loader,
                     show=False,
                     out_dir=None,
-                    show_score_thr=0.3):
+                    show_score_thr=0):
+    print('Now Single GPU Test !')
     model.eval()
     results = []
     dataset = data_loader.dataset
@@ -37,25 +38,32 @@ def single_gpu_test(model,
             else:
                 img_tensor = data['img'][0].data[0]
             img_metas = data['img_metas'][0].data[0]
+            N = img_tensor.shape[0]
+            assert N == len(img_metas)
             if img_metas[0]['img_shape'][2] > 3:
-                imgs = []
-                rgb_mean = img_metas[0]['img_norm_cfg']['mean'][:3]
-                lwir_mean = img_metas[0]['img_norm_cfg']['mean'][3:]
-                rgb_std = img_metas[0]['img_norm_cfg']['std'][:3]
-                lwir_std = img_metas[0]['img_norm_cfg']['std'][3:]
-                lwir_norm_cfg = {
-                    'mean':lwir_mean,
-                    'std':lwir_std,
+                rgb_mean = [img_meta['img_norm_cfg']['mean'][:3] for img_meta in img_metas]
+                lwir_mean = [img_meta['img_norm_cfg']['mean'][3:] for img_meta in img_metas]
+                rgb_std = [img_meta['img_norm_cfg']['std'][:3] for img_meta in img_metas]
+                lwir_std = [img_meta['img_norm_cfg']['std'][3:] for img_meta in img_metas]
+                rgb_norm_cfg, lwir_norm_cfg = [], []
+                for rgb_m, rgb_s, ir_m, ir_s in zip(rgb_mean, rgb_std, lwir_mean, lwir_std):
+                    rgb_norm_cfg.append({
+                    'mean':rgb_m,
+                    'std':rgb_s,
                     'to_rgb':False
-                }
-                rgb_norm_cfg = {
-                    'mean':rgb_mean,
-                    'std':rgb_std,
+                    })
+                    lwir_norm_cfg.append({
+                    'mean':ir_m,
+                    'std':ir_s,
                     'to_rgb':False
-                }
-                imgs_rgb = tensor2imgs(img_tensor[:,:3,:,:], **rgb_norm_cfg)
-                imgs_lwir = tensor2imgs(img_tensor[:,3:,:,:], **lwir_norm_cfg)
-                imgs.append([imgs_rgb,imgs_lwir])
+                    })
+                imgs_rgb, imgs_lwir = [], []
+                for n in range(N):
+                    imgs_rgb.append(tensor2imgs(img_tensor[n:n+1,:3,:,:], **rgb_norm_cfg[n])[0])
+                    imgs_lwir.append(tensor2imgs(img_tensor[n:n+1,3:,:,:], **lwir_norm_cfg[n])[0])
+     
+                assert len(imgs_rgb) == len(img_metas) == len(imgs_lwir)
+                imgs = [[imgs_rgb[n], imgs_lwir[n]] for n in range(N)]
 
             else:
                 imgs = tensor2imgs(img_tensor, **img_metas[0]['img_norm_cfg'])
@@ -68,7 +76,7 @@ def single_gpu_test(model,
                 if isinstance(img, list):
                     img_show = []
                     for img_single in img:
-                        img_single = img_single[0][:h, :w, :]
+                        img_single = img_single[:h, :w, :]
                         img_show.append(mmcv.imresize(img_single, (ori_w, ori_h)))
                 else:
                     img_show = img[:h, :w, :]
@@ -76,41 +84,31 @@ def single_gpu_test(model,
 
                 if out_dir:
                     if len(img_meta['ori_filename']) > 1:
-                        out_file = []
-                        for j in range(len(img_meta['ori_filename'])):
-                            out_file.append(osp.join(out_dir, img_meta['ori_filename'][j]))
+                        path = img_meta['ori_filename'][0]
+                        path = path.split('/')[-1].replace('_visible', '')
+                        out_file = osp.join(out_dir, path)
                     else:
                         out_file = osp.join(out_dir, img_meta['ori_filename'])
                 else:
                     out_file = None
 
-                if isinstance(out_file, list):
-                    for m, out_file_single in enumerate(out_file):
-                        
-                        model.module.show_result(
-                        img_show[m],
-                        result[i],
-                        show=show,
-                        out_file=out_file_single,
-                        score_thr=show_score_thr)
-                else:
-                    model.module.show_result(
-                        img_show,
-                        result[i],
-                        show=show,
-                        out_file=out_file,
-                        score_thr=show_score_thr)
+                model.module.show_result(
+                    img_show,
+                    result[i],
+                    show=show,
+                    out_file=out_file,
+                    score_thr=show_score_thr)
 
-        # encode mask results
-        if isinstance(result[0], tuple):
-            result = [(bbox_results, encode_mask_results(mask_results))
-                      for bbox_results, mask_results in result]
-        # This logic is only used in panoptic segmentation test.
-        elif isinstance(result[0], dict) and 'ins_results' in result[0]:
-            for j in range(len(result)):
-                bbox_results, mask_results = result[j]['ins_results']
-                result[j]['ins_results'] = (bbox_results,
-                                            encode_mask_results(mask_results))
+        # # encode mask results
+        # if isinstance(result[0], tuple):
+        #     result = [(bbox_results, encode_mask_results(mask_results))
+        #               for bbox_results, mask_results in result]
+        # # This logic is only used in panoptic segmentation test.
+        # elif isinstance(result[0], dict) and 'ins_results' in result[0]:
+        #     for j in range(len(result)):
+        #         bbox_results, mask_results = result[j]['ins_results']
+        #         result[j]['ins_results'] = (bbox_results,
+        #                                     encode_mask_results(mask_results))
 
         results.extend(result)
 
@@ -138,6 +136,7 @@ def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     Returns:
         list: The prediction results.
     """
+    print('Now Multi GPU Test !')
     model.eval()
     results = []
     dataset = data_loader.dataset
@@ -149,15 +148,15 @@ def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
         with torch.no_grad():
             result = model(return_loss=False, rescale=True, **data)
             # encode mask results
-            if isinstance(result[0], tuple):
-                result = [(bbox_results, encode_mask_results(mask_results))
-                          for bbox_results, mask_results in result]
-            # This logic is only used in panoptic segmentation test.
-            elif isinstance(result[0], dict) and 'ins_results' in result[0]:
-                for j in range(len(result)):
-                    bbox_results, mask_results = result[j]['ins_results']
-                    result[j]['ins_results'] = (
-                        bbox_results, encode_mask_results(mask_results))
+            # if isinstance(result[0], tuple):
+            #     result = [(bbox_results, encode_mask_results(mask_results))
+            #               for bbox_results, mask_results in result]
+            # # This logic is only used in panoptic segmentation test.
+            # elif isinstance(result[0], dict) and 'ins_results' in result[0]:
+            #     for j in range(len(result)):
+            #         bbox_results, mask_results = result[j]['ins_results']
+            #         result[j]['ins_results'] = (
+            #             bbox_results, encode_mask_results(mask_results))
 
         results.extend(result)
 

@@ -1,1 +1,1 @@
-bash ./tools/dist_train.sh configs/multispec/yolox_kaist_3stream_2nc_coattention.py 4 
+bash ./tools/dist_train.sh configs/multispec/yolox_kaist_3stream_2nc_coattention.py 2

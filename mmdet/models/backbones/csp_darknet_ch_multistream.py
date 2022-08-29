@@ -310,10 +310,17 @@ class CSPDarknetCH_MultiStream(BaseModule):
             self.after_stage2_plugins_names = self.make_block_plugins(self.after_stage2_plugins, '_plugin_stage2')
             self.after_stage3_plugins_names = self.make_block_plugins(self.after_stage3_plugins, '_plugin_stage3')
             self.after_stage4_plugins_names = self.make_block_plugins(self.after_stage4_plugins, '_plugin_stage4')
-            self.after_stage1_plugins_names = [[], []]
             self.plugin_names = [self.after_stage1_plugins_names, self.after_stage2_plugins_names, self.after_stage3_plugins_names, self.after_stage4_plugins_names]
 
-    
+            for plgs in self.plugin_names:                
+                if plgs[0] and plgs[1]:
+                    _stage = int(plgs[0][0][-1])
+                    self.add_module('b_norm_rgb'+plgs[0][0][-14:],\
+                                        nn.BatchNorm2d(arch_setting[_stage-1][1], momentum=0.03, eps=0.001))
+                    self.add_module('b_norm_tir'+plgs[1][0][-14:],\
+                                        nn.BatchNorm2d(arch_setting[_stage-1][1], momentum=0.03, eps=0.001))
+
+    print('a')
 
     def make_block_plugins(self,plugins, postfix):
         """make plugins for block.
@@ -326,6 +333,8 @@ class CSPDarknetCH_MultiStream(BaseModule):
             list[str]: List of the names of plugin.
         """
         assert isinstance(plugins, list)
+        if not plugins:
+            return  [[],[]]
         plugin_names = []
         for plugin in plugins:
             plugin = plugin.copy()
@@ -374,6 +383,7 @@ class CSPDarknetCH_MultiStream(BaseModule):
 
     def forward(self, x):
         outs = []
+        unique_outs = []
         # 先计算stem
         x1 = getattr(self, 'stem_s1')(x[:, :3, :, :])   #rgb
         x2 = getattr(self, 'stem_s2')(x[:, 3:, :, :])   #lwir
@@ -382,19 +392,41 @@ class CSPDarknetCH_MultiStream(BaseModule):
         
         # 计算各stage的值，并在其中计算plugin
         for i, layer_name in enumerate(self.layers):
-            x1 = getattr(self, layer_name[0])(x1)
-            x2 = getattr(self, layer_name[1])(x2)
+            x1 = getattr(self, layer_name[0])(x1)   #rgb
+            x2 = getattr(self, layer_name[1])(x2)   #lwir
             if len(layer_name) == 3:
                 x3 = getattr(self, layer_name[2])(x3)
             else:
                 x3 = None
             if self.with_plugins:
                 if len(layer_name) == 3:
-                    x1, x3 = self.forward_plugin(x1, x3, self.plugin_names[i][0])
-                    x2, x3 = self.forward_plugin(x2, x3, self.plugin_names[i][1])
-                else:
-                    x1, x2 = self.forward_plugin(x1, x2, self.plugin_names[i])
+                    if hasattr(self, f'b_norm_rgb_plugin_stage{i+1}'):
+                        u_x1 = x1
+                        x1, x3 = self.forward_plugin(x1, x3, self.plugin_names[i][0])
+                        x1 += u_x1
+                        assert int(self.plugin_names[i][0][0][-1]) == i + 1
+                        x1 = getattr(self, f'b_norm_rgb_plugin_stage{i+1}')(x1)
+
+                        u_x2 = x2
+                        x2, x3 = self.forward_plugin(x2, x3, self.plugin_names[i][1])
+                        x2 += u_x2
+                        x2 = getattr(self, f'b_norm_tir_plugin_stage{i+1}')(x2)
+                    else:
+                        x1, x3 = self.forward_plugin(x1, x3, self.plugin_names[i][0])
+                        x2, x3 = self.forward_plugin(x2, x3, self.plugin_names[i][1])
+                else:               
+                    if hasattr(self, f'b_norm_rgb_plugin_stage{i+1}'):
+                        u_x1, u_x2 = x1, x2
+                        x1, x2 = self.forward_plugin(x1, x2, self.plugin_names[i])
+                        x1 += u_x1
+                        assert int(self.plugin_names[i][0][0][-1]) == i + 1
+                        x1 = getattr(self, f'b_norm_rgb_plugin_stage{i+1}')(x1)
+                        x2 += u_x2
+                        x2 = getattr(self, f'b_norm_tir_plugin_stage{i+1}')(x2)
+                    else:
+                        x1, x2 = self.forward_plugin(x1, x2, self.plugin_names[i])
                     x3 = None
             if i+1 in self.out_indices:
                 outs.append([x1, x2, x3])
-        return tuple(outs)
+                unique_outs.append([u_x1, u_x2])
+        return tuple(outs), tuple(unique_outs)

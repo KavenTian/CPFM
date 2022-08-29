@@ -1,11 +1,16 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from tkinter import OUTSIDE
+from turtle import shape
 from ..builder import DETECTORS, build_backbone, build_loss,build_neck
 from .single_stage import SingleStageDetector
 from copy import deepcopy
 from mmdet.core import bbox2result
 import torch
-
+import numpy as np
 import re
+import mmcv
+import matplotlib.pyplot as plt
+import cv2
 
 
 @DETECTORS.register_module()
@@ -63,19 +68,18 @@ class RGBT_Det_MultiStream(SingleStageDetector):
     def set_epoch(self, epoch):
         self.bbox_head.epoch = epoch
     
-    def forward_train(self, img, img_metas, gt_bboxes, gt_labels, gt_bboxes_ignore=None):
-        
+
+    def forward_train(self, img, img_metas, **kwargs):   
         x = self.extract_feat(img)  #8 16 32, 64
         
-        losses = self.bbox_head.forward_train(x, img_metas, gt_bboxes,
-                                            gt_labels, gt_bboxes_ignore)
+        losses = self.bbox_head.forward_train(x, img_metas, **kwargs)
         return losses
     
 
     
     def extract_feat(self, img):
         """Directly extract features from the backbone+neck."""
-        feats = self.backbone(img)  # [[x_rgb, x_lwir, x_pub],...]
+        feats, unique_feats = self.backbone(img)  # (([rgb_1, tir_1, pub_1],...), ([u_rgb_1, u_tir_1],...))
         feat_rgb = [feat[0] for feat in feats]
         feat_lwir = [feat[1] for feat in feats]
         feat_pub = [feat[2] for feat in feats]
@@ -84,15 +88,13 @@ class RGBT_Det_MultiStream(SingleStageDetector):
         
         if self.with_neck:
             x = self.neck(feat_out)
-        return x
+        return x, unique_feats
 
     def simple_test(self, img, img_metas, rescale=False):
         feat = self.extract_feat(img)
         results_list = self.bbox_head.simple_test(feat, img_metas, rescale=rescale)
         bbox_results = [
-            bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-            for det_bboxes, det_labels in results_list
-        ]
+            self.bbox2result(*outs, self.bbox_head.num_classes) for outs in results_list]
         return bbox_results
 
     def aug_test(self, imgs, img_metas, rescale=False):
@@ -121,8 +123,235 @@ class RGBT_Det_MultiStream(SingleStageDetector):
         results_list = self.bbox_head.aug_test(
             feats, img_metas, rescale=rescale)
         bbox_results = [
-            bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
+            self.bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
             for det_bboxes, det_labels in results_list
         ]
         return bbox_results
     
+    def bbox2result(self,
+                    rgb_bboxes,
+                    tir_bboxes,
+                    rgb_ids, 
+                    tir_ids, 
+                    rgb_scores, 
+                    tir_scores, 
+                    rgb_labels,
+                    tir_labels,
+                    anchor_scores, 
+                    num_classes):
+        """Convert detection results to a list of numpy arrays.
+
+        Args:
+
+            num_classes (int): class number, including background class
+
+        Returns:
+            list(ndarray): bbox results of each class
+        """
+        if anchor_scores.shape[0] == 0:
+            return [np.zeros((0, 4), dtype=np.float32) for i in range(num_classes)],\
+                   [np.zeros((0, 4), dtype=np.float32) for i in range(num_classes)],\
+                   [np.zeros((0,), dtype=np.int64) for i in range(num_classes)],\
+                   [np.zeros((0,), dtype=np.int64) for i in range(num_classes)],\
+                   [np.zeros((0,), dtype=np.float32) for i in range(num_classes)],\
+                   [np.zeros((0,), dtype=np.float32) for i in range(num_classes)],\
+                   [np.zeros((0,), dtype=np.float32) for i in range(num_classes)]
+        else:
+            if isinstance(rgb_bboxes, torch.Tensor):
+                f = lambda x: x.detach().cpu().numpy()
+                rgb_bboxes, tir_bboxes, rgb_ids, tir_ids,\
+                rgb_scores, tir_scores,\
+                rgb_labels, tir_labels,\
+                anchor_scores = list(map(f, (rgb_bboxes, tir_bboxes, rgb_ids, tir_ids,\
+                                            rgb_scores, tir_scores,\
+                                            rgb_labels, tir_labels,\
+                                            anchor_scores)))
+
+                anchor_labels = np.zeros_like(anchor_scores, dtype=rgb_labels.dtype)
+                for j in range(len(rgb_ids)):
+                    anchor_labels[rgb_ids[j]] = rgb_labels[j]
+                for j in range(len(tir_ids)):
+                    anchor_labels[tir_ids[j]] = tir_labels[j]
+
+            return [rgb_bboxes[rgb_labels == i, :] for i in range(num_classes)],\
+                   [tir_bboxes[tir_labels == i, :] for i in range(num_classes)],\
+                   [rgb_ids[rgb_labels == i] for i in range(num_classes)],\
+                   [tir_ids[tir_labels == i] for i in range(num_classes)],\
+                   [rgb_scores[rgb_labels == i] for i in range(num_classes)],\
+                   [tir_scores[tir_labels == i] for i in range(num_classes)],\
+                   [anchor_scores[anchor_labels == i] for i in range(num_classes)]
+
+    def show_result(self,
+                    img:list,
+                    result:tuple,
+                    score_thr=0,
+                    bbox_color=(72, 101, 241),
+                    text_color=(72, 101, 241),
+                    mask_color=None,
+                    thickness=2,
+                    font_size=13,
+                    win_name='',
+                    show=False,
+                    wait_time=0,
+                    out_file=None):
+
+        img_rgb, img_tir = img.copy()
+        
+        rgb_bbox, tir_bbox = result[:2]
+        
+        rgb_labels = np.concatenate([
+            np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(rgb_bbox)])
+        tir_labels = np.concatenate([
+            np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(tir_bbox)])
+        
+        f = lambda x: np.concatenate(x, axis=0)
+        rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, anchor_scores \
+            = list(map(f, result))   
+
+        assert len(rgb_bboxes) == len(rgb_ids) == len(rgb_scores) == len(rgb_labels) and \
+               len(tir_bboxes) == len(tir_ids) == len(tir_scores) == len(tir_labels)
+        
+        # use "labels" key_word to mark person ids
+        class_names = [str(i) for i in range(len(anchor_scores))]          
+        
+        # if out_file specified, do not show image in window
+
+        # draw bounding boxes
+        rgb_out = imshow_det_bboxes(
+            img_rgb,
+            rgb_bboxes,
+            scores=rgb_scores,
+            person_id=rgb_ids,
+            labels=rgb_labels,
+            class_names=class_names,
+            score_thr=score_thr,
+            bbox_color=bbox_color,
+            text_color=text_color,
+            thickness=thickness,
+            font_size=font_size,
+            win_name=win_name,
+            wait_time=wait_time)
+
+        tir_out = imshow_det_bboxes(
+            img_tir,
+            tir_bboxes,
+            scores=tir_scores,
+            person_id=tir_ids,
+            labels=tir_labels,
+            class_names=class_names,
+            score_thr=score_thr,
+            bbox_color=bbox_color,
+            text_color=text_color,
+            thickness=thickness,
+            font_size=font_size,
+            win_name=win_name,
+            wait_time=wait_time)
+
+        img = np.concatenate((rgb_out, tir_out), axis=1)
+
+        if not (show or out_file):
+            return img
+
+        mmcv.imwrite(img, out_file)
+
+
+EPS = 1e-2
+def imshow_det_bboxes(img,
+                      bboxes,
+                      scores,
+                      person_id,
+                      labels,
+                      class_names=None,
+                      score_thr=0,
+                      bbox_color='green',
+                      text_color='green',
+                      thickness=2,
+                      font_size=8,
+                      win_name='',
+                      show=False,
+                      wait_time=0,
+                      out_file=None):
+    from mmdet.core.visualization.palette import get_palette, palette_val
+    from mmdet.core.visualization.image import _get_adaptive_scales, draw_bboxes, draw_labels
+    
+    assert len(bboxes) == len(person_id) == len(scores) == len(labels)
+    img = mmcv.imread(img).astype(np.uint8)
+
+    if score_thr > 0:
+        assert bboxes is not None and bboxes.shape[1] == 4
+        inds = scores > score_thr
+        bboxes = bboxes[inds, :]
+        labels = labels[inds]
+        person_id = person_id[inds]
+        scores = scores[inds]
+
+    img = mmcv.bgr2rgb(img)
+    width, height = img.shape[1], img.shape[0]
+    img = np.ascontiguousarray(img)
+
+    fig = plt.figure(win_name, frameon=False)
+    plt.title(win_name)
+    canvas = fig.canvas
+    dpi = fig.get_dpi()
+    # add a small EPS to avoid precision lost due to matplotlib's truncation
+    # (https://github.com/matplotlib/matplotlib/issues/15363)
+    fig.set_size_inches((width + EPS) / dpi, (height + EPS) / dpi)
+
+    # remove white edges by set subplot margin
+    plt.subplots_adjust(left=0, right=1, bottom=0, top=1)
+    ax = plt.gca()
+    ax.axis('off')
+
+    max_label = int(max(labels) if len(labels) > 0 else 0)
+    text_palette = palette_val(get_palette(text_color, max_label + 1))
+    text_colors = [text_palette[label] for label in labels]
+
+    num_bboxes = 0
+    if bboxes is not None:
+        num_bboxes = bboxes.shape[0]
+        bbox_palette = palette_val(get_palette(bbox_color, max_label + 1))
+        colors = [bbox_palette[label] for label in labels[:num_bboxes]]
+        draw_bboxes(ax, bboxes, colors, alpha=0.8, thickness=thickness)
+
+        horizontal_alignment = 'left'
+        positions = bboxes[:, :2].astype(np.int32) + thickness
+        areas = (bboxes[:, 3] - bboxes[:, 1]) * (bboxes[:, 2] - bboxes[:, 0])
+        scales = _get_adaptive_scales(areas)
+        
+        draw_labels(
+            ax,
+            person_id,
+            positions,
+            scores=scores,
+            class_names=class_names,
+            color=text_colors,
+            font_size=font_size,
+            scales=scales,
+            horizontal_alignment=horizontal_alignment)
+
+
+    plt.imshow(img)
+
+    stream, _ = canvas.print_to_buffer()
+    buffer = np.frombuffer(stream, dtype='uint8')
+    img_rgba = buffer.reshape(height, width, 4)
+    rgb, alpha = np.split(img_rgba, [3], axis=2)
+    img = rgb.astype('uint8')
+    img = mmcv.rgb2bgr(img)
+
+    if show:
+        # We do not use cv2 for display because in some cases, opencv will
+        # conflict with Qt, it will output a warning: Current thread
+        # is not the object's thread. You can refer to
+        # https://github.com/opencv/opencv-python/issues/46 for details
+        if wait_time == 0:
+            plt.show()
+        else:
+            plt.show(block=False)
+            plt.pause(wait_time)
+    if out_file is not None:
+        mmcv.imwrite(img, out_file)
+
+    plt.close()
+
+    return img

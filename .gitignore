@@ -2,3 +2,4 @@
 *.pyc
 .vscode
 mmdet.egg-info/
+work_dirs/
