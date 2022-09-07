@@ -137,6 +137,7 @@ class RGBT_Det_MultiStream(SingleStageDetector):
                     tir_scores, 
                     rgb_labels,
                     tir_labels,
+                    union_bboxes,
                     anchor_scores, 
                     num_classes):
         """Convert detection results to a list of numpy arrays.
@@ -155,6 +156,7 @@ class RGBT_Det_MultiStream(SingleStageDetector):
                    [np.zeros((0,), dtype=np.int64) for i in range(num_classes)],\
                    [np.zeros((0,), dtype=np.float32) for i in range(num_classes)],\
                    [np.zeros((0,), dtype=np.float32) for i in range(num_classes)],\
+                   [np.zeros((0, 4), dtype=np.float32) for i in range(num_classes)],\
                    [np.zeros((0,), dtype=np.float32) for i in range(num_classes)]
         else:
             if isinstance(rgb_bboxes, torch.Tensor):
@@ -162,10 +164,10 @@ class RGBT_Det_MultiStream(SingleStageDetector):
                 rgb_bboxes, tir_bboxes, rgb_ids, tir_ids,\
                 rgb_scores, tir_scores,\
                 rgb_labels, tir_labels,\
-                anchor_scores = list(map(f, (rgb_bboxes, tir_bboxes, rgb_ids, tir_ids,\
-                                            rgb_scores, tir_scores,\
-                                            rgb_labels, tir_labels,\
-                                            anchor_scores)))
+                union_bboxes, anchor_scores = list(map(f, (rgb_bboxes, tir_bboxes, rgb_ids, tir_ids,\
+                                                rgb_scores, tir_scores,\
+                                                rgb_labels, tir_labels,\
+                                                union_bboxes, anchor_scores)))
 
                 anchor_labels = np.zeros_like(anchor_scores, dtype=rgb_labels.dtype)
                 for j in range(len(rgb_ids)):
@@ -179,6 +181,7 @@ class RGBT_Det_MultiStream(SingleStageDetector):
                    [tir_ids[tir_labels == i] for i in range(num_classes)],\
                    [rgb_scores[rgb_labels == i] for i in range(num_classes)],\
                    [tir_scores[tir_labels == i] for i in range(num_classes)],\
+                   [union_bboxes[anchor_labels == i] for i in range(num_classes)],\
                    [anchor_scores[anchor_labels == i] for i in range(num_classes)]
 
     def show_result(self,
@@ -205,11 +208,12 @@ class RGBT_Det_MultiStream(SingleStageDetector):
             np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(tir_bbox)])
         
         f = lambda x: np.concatenate(x, axis=0)
-        rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, anchor_scores \
+        rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, union_bboxes, anchor_scores \
             = list(map(f, result))   
 
         assert len(rgb_bboxes) == len(rgb_ids) == len(rgb_scores) == len(rgb_labels) and \
-               len(tir_bboxes) == len(tir_ids) == len(tir_scores) == len(tir_labels)
+               len(tir_bboxes) == len(tir_ids) == len(tir_scores) == len(tir_labels) and \
+               len(union_bboxes) == len(anchor_scores)
         
         # use "labels" key_word to mark person ids
         class_names = [str(i) for i in range(len(anchor_scores))]          

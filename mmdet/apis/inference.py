@@ -266,7 +266,7 @@ def inference_rgbt_detector(model, imgs):
         # set loading pipeline type
         cfg.data.test.pipeline[0].type = 'LoadImageFromWebcam'
 
-    cfg.data.test.pipeline = replace_ImageToTensor(cfg.data.test.pipeline)
+    # cfg.data.test.pipeline = replace_ImageToTensor(cfg.data.test.pipeline)
     test_pipeline = Compose(cfg.data.test.pipeline)
     # print(test_pipeline)
     datas = []
@@ -280,12 +280,16 @@ def inference_rgbt_detector(model, imgs):
         data = dict(img_info=dict(filename=imgs), img_prefix=None)
         # build the data pipeline
         data = test_pipeline(data)
+        # batch_img = data['img']
+        # batch = torch.stack(batch_img, dim=0)
+        # data['img'] = batch
+
         datas.append(data)
 
     data = collate(datas, samples_per_gpu=1)
     # just get the actual data from DataContainer
     data['img_metas'] = [img_metas.data[0] for img_metas in data['img_metas']]
-    data['img'] = [img.data[0] for img in data['img']]
+    # data['img'] = [img.data[0] for img in data['img']]
     if next(model.parameters()).is_cuda:
         # scatter to specified GPU
         data = scatter(data, [device])[0]

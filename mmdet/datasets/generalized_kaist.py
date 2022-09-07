@@ -2,13 +2,14 @@
 from ctypes import Union
 import itertools
 import logging
+from ntpath import join
 import os.path as osp
 import tempfile
 import warnings
 from collections import OrderedDict, defaultdict
 import datetime, sys
 import pdb, traceback
-import copy
+import copy, os, json
 
 import mmcv
 import numpy as np
@@ -20,6 +21,10 @@ from .api_wrappers import COCO, COCOeval
 from pycocotools.cocoeval import Params
 from .builder import DATASETS
 from .custom import CustomDataset
+
+import scipy
+from .brambox import boxes as bbb
+from .brambox.boxes.statistics.mr_fppi import mr_fppi
 
 
 @DATASETS.register_module()
@@ -202,7 +207,7 @@ class GneralKaist(CustomDataset):
             union = [x1, y1, x2 - x1, y2 - y1]
         return union
 
-    def _det2json(self, results) -> list:
+    def _det2json(self, results):
         """Convert detection results to COCO json style."""
         assert len(results) == len(self)
 
@@ -211,7 +216,10 @@ class GneralKaist(CustomDataset):
         union_json_results = []
         for idx in range(len(self)):
             img_id = self.img_ids[idx]
-            rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, anchor_scores = results[idx]
+            # rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, union_bboxes, anchor_scores\
+            #      = results[idx]
+            rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, _, anchor_scores\
+                 = results[idx]
             # rgb
             for label in range(len(rgb_bboxes)): # in different class
                 bboxes = rgb_bboxes[label]
@@ -265,6 +273,20 @@ class GneralKaist(CustomDataset):
                     data['category_id'] = self.cat_ids[label]
                     data['person_id'] = int(u_ids[i])
                     union_json_results.append(data)
+            
+            # id = 0
+            # for label in range(len(union_bboxes)):
+            #     bboxes = union_bboxes[label]
+            #     scores = anchor_scores[label]
+            #     for i in range(bboxes.shape[0]):
+            #         data = dict()
+            #         data['image_id'] = img_id
+            #         data['bbox'] = self.xyxy2xywh(bboxes[i])
+            #         data['score'] = float(scores[i])
+            #         data['category_id'] = self.cat_ids[label]
+            #         data['person_id'] = id
+            #         union_json_results.append(data)
+            #         id += 1
 
         return rgb_json_results, tir_json_results, union_json_results
     
@@ -345,79 +367,187 @@ class GneralKaist(CustomDataset):
             if metric not in allowed_metrics:
                 raise KeyError(f'metric {metric} is not supported')
         
-        ori_coco_gt = self.coco
-        
-        # get GT in each modal
-        rgb_coco_gt = self.get_single_gt(copy.deepcopy(ori_coco_gt), modal_pos=0)
-        tir_coco_gt = self.get_single_gt(copy.deepcopy(ori_coco_gt), modal_pos=1)
-        union_coco_gt = self.get_union_gt(copy.deepcopy(ori_coco_gt))
-
+        # jsonfile_prefix = '/workspace/work_dirs/yolox_kaist_3stream_2nc_coattention/brambox_res'
         # get det in each modal
         rgb_result_files, tir_result_files, union_result_files, tmp_dir = \
                                         self.format_results(results, jsonfile_prefix)
-
-        self.rgb_eval_result = self.evaluate_kaist_mr(rgb_coco_gt, rgb_result_files['bbox'], 'RGB', logger=logger)
-        self.tir_eval_result = self.evaluate_kaist_mr(tir_coco_gt, tir_result_files['bbox'], 'TIR', logger=logger)
-        self.union_eval_result = self.evaluate_kaist_mr(union_coco_gt, union_result_files['bbox'], 'Union', logger=logger)
+        
+        self.mr_rgb, self.mr_tir, self.mr_union = self.evaluate_lamr(rgb_result_files['bbox'],
+                                                        tir_result_files['bbox'],
+                                                        union_result_files['bbox'],
+                                                        jsonfile_prefix)
+        
+        msg = '\nHere LAMR percision not aligned with official matlab release!\n'
+        msg += f'Union-LAMR All = {100 * self.mr_union["all"]:>5.2f}, '\
+            + f'Union-LAMR Day = {100 * self.mr_union["day"]:>5.2f}, '\
+            + f'Union-LAMR Night = {100 * self.mr_union["night"]:>5.2f}\n'\
+            + f'RGB-LAMR All   = {100 * self.mr_rgb["all"]:>5.2f}, '\
+            + f'RGB-LAMR Day   = {100 * self.mr_rgb["day"]:>5.2f}, '\
+            + f'RGB-LAMR Night   = {100 * self.mr_rgb["night"]:>5.2f}\n' \
+            + f'TIR-LAMR All   = {100 * self.mr_tir["all"]:>5.2f}, '\
+            + f'TIR-LAMR Day   = {100 * self.mr_tir["day"]:>5.2f}, '\
+            + f'TIR-LAMR Night   = {100 * self.mr_tir["night"]:>5.2f}'
+        print_log(msg, logger=logger)
+    
+        # ori_coco_gt = self.coco      
+        # # get GT in each modal
+        # rgb_coco_gt = self.get_single_gt(copy.deepcopy(ori_coco_gt), modal_pos=0)
+        # tir_coco_gt = self.get_single_gt(copy.deepcopy(ori_coco_gt), modal_pos=1)
+        # union_coco_gt = self.get_union_gt(copy.deepcopy(ori_coco_gt))
+        # self.rgb_eval_result = self.evaluate_kaist_mr(rgb_coco_gt, rgb_result_files['bbox'], 'RGB', logger=logger)
+        # self.tir_eval_result = self.evaluate_kaist_mr(tir_coco_gt, tir_result_files['bbox'], 'TIR', logger=logger)
+        # self.union_eval_result = self.evaluate_kaist_mr(union_coco_gt, union_result_files['bbox'], 'Union', logger=logger)
       
         if tmp_dir is not None:
             tmp_dir.cleanup()
 
         eval_result = OrderedDict()
-        for modal in ['rgb', 'tir', 'union']:
-            res = getattr(self, modal + '_eval_result')
-            mr_all = 100 * res['all'].summarize(0)
-            mr_day = 100 * res['day'].summarize(0)
-            mr_night = 100 * res['night'].summarize(0)
-            recall_all = 100 * (1 - res['all'].eval['yy'][0][-1])
-            eval_result[f'{modal}_mr_all'] = mr_all
-            eval_result[f'{modal}_mr_day'] = mr_day
-            eval_result[f'{modal}_mr_night'] = mr_night
-            eval_result[f'{modal}_recall_all'] = recall_all
-        assert len(eval_result) == 12
+        for modal in ['union', 'rgb', 'tir',]:
+            res = getattr(self, 'mr_' + modal)
+            eval_result[f'{modal}_mr_all'] = 100 * res['all']
+            eval_result[f'{modal}_mr_day'] = 100 * res['day']
+            eval_result[f'{modal}_mr_night'] = 100 * res['night']
+        assert len(eval_result) == 9
         
         return eval_result
 
-    def evaluate_kaist_mr(self, kaistGt, kaistDt_file, modal, logger=None):
+    def evaluate_lamr(self,
+                      rgb_json:str,
+                      tir_json:str,
+                      union_json:str,
+                      jsonfile_prefix:str):
+        with open(rgb_json, 'r') as f:
+            rgb_res = json.load(f)
+        with open(tir_json, 'r') as f:
+            tir_res = json.load(f)
+        with open(union_json, 'r') as f:
+            union_res = json.load(f)
+
+        # eval rgb
+        mr_rgb = dict()
+        mr_rgb['all'], mr_rgb['day'], mr_rgb['night'] = self.log_avg_MR(rgb_res, self, jsonfile_prefix, modal="vis")
+
+        # eval tir
+        mr_tir = dict()
+        mr_tir['all'], mr_tir['day'], mr_tir['night'] = self.log_avg_MR(tir_res, self, jsonfile_prefix, modal="tir")
+
+        # eval tir
+        mr_union = dict()
+        mr_union['all'], mr_union['day'], mr_union['night'] = self.log_avg_MR(union_res, self, jsonfile_prefix, modal="union")
+
+        return mr_rgb, mr_tir, mr_union
+
+    @staticmethod
+    def log_avg_MR(coco_results, ori_dataset, json_result_root, modal:str):
+        assert modal in ['vis', 'tir', 'union']
+        identify = lambda f: os.path.splitext("/".join(f.rsplit('/')[-3:]))[0]
+        ground_truth = bbb.parse('anno_dollar',\
+                                 f'/workspace/annotations/{modal}/*/*/*.txt',\
+                                 identify, occlusion_tag_map=[0.0, 0.25, 0.75])
         
-        kaistDt = kaistGt.loadRes(kaistDt_file)
-        imgIds = sorted(kaistGt.getImgIds())
-        kaistEval = KAISTPedEval(kaistGt, kaistDt, 'bbox')
+        bbb.filter_ignore(ground_truth, [bbb.ClassLabelFilter(['person']),  # only consider 'person' objects
+                                        bbb.HeightRangeFilter((50, float('Inf'))),  # select instances of 50 pixels or higher
+                                        bbb.OcclusionAreaFilter(
+                                            (0.65, float('Inf')))])  # only include objects that are 65% visible or more
+
+        for _, annos in ground_truth.items():
+            for i in range(len(annos)):
+                annos[i].class_label = 'person'
         
-        kaistEval.params.catIds = [1]
+        # bbb.modify(ground_truth, [bbb.AspectRatioModifier(.41, modify_ignores=False)]);
 
-        eval_result = {
-        'all': copy.deepcopy(kaistEval),
-        'day': copy.deepcopy(kaistEval),
-        'night': copy.deepcopy(kaistEval),
-        }
-
-        eval_result['all'].params.imgIds = imgIds
-        eval_result['all'].evaluate(0)
-        eval_result['all'].accumulate()
-        MR_all = eval_result['all'].summarize(0)
-
-        eval_result['day'].params.imgIds = imgIds[:1455]
-        eval_result['day'].evaluate(0)
-        eval_result['day'].accumulate()
-        MR_day = eval_result['day'].summarize(0)
-
-        eval_result['night'].params.imgIds = imgIds[1455:]
-        eval_result['night'].evaluate(0)
-        eval_result['night'].accumulate()
-        MR_night = eval_result['night'].summarize(0)
-
-        recall_all = 1 - eval_result['all'].eval['yy'][0][-1]
+        ground_truth_day = {key: values for key, values in ground_truth.items() if
+                            key.startswith('set06') or key.startswith('set07') or key.startswith('set08')}
+        ground_truth_night = {key: values for key, values in ground_truth.items() if
+                            key.startswith('set09') or key.startswith('set10') or key.startswith('set11')}
         
-        msg = f'\n############# Modal: {modal} #############\n' \
-            + f'MR_all: {MR_all * 100:.2f}\n' \
-            + f'MR_day: {MR_day * 100:.2f}\n' \
-            + f'MR_night: {MR_night * 100:.2f}\n' \
-            + f'recall_all: {recall_all * 100:.2f}\n' \
-            + '######################################\n\n'
-        print_log(msg, logger=logger)
+        def parse_detections(format, input, identify_fun=identify, clslabelmap=['person']):
+            dets = bbb.parse(format, input, identify_fun, class_label_map=clslabelmap)
+            # bbb.modify(dets, [bbb.AspectRatioModifier(.41)])
+            bbb.filter_discard(dets, [bbb.HeightRangeFilter((50 / 1.25, float('Inf')))])
+            return dets
 
-        return eval_result
+        image_info = ori_dataset.coco.dataset['images']
+        id_to_name_dict = {}
+        for img in image_info:
+            name_list = img['file_name'][1][:-4].split('/')[1].split('_')
+            name_list.remove('lwir')
+            new_name = '/'.join(name_list)
+            idx = img['id']
+            id_to_name_dict[idx] = new_name
+        assert len(id_to_name_dict) == len(ori_dataset.coco.dataset['images'])
+        for item in coco_results:
+            name = id_to_name_dict[item['image_id']]
+            item['image_id'] = name
+
+        json_result_file = f'{json_result_root}.lamr_bbox.json'
+        with open(json_result_file, "w") as f:
+            json.dump(coco_results, f)
+        
+
+        detections_all = parse_detections('det_coco', json_result_file)
+
+        detections_day = {key: values for key, values in detections_all.items() if
+                                    key.startswith('set06') or key.startswith('set07') or key.startswith('set08')}
+        detections_night = {key: values for key, values in detections_all.items() if
+                                    key.startswith('set09') or key.startswith('set10') or key.startswith('set11')}
+        # all
+        miss_rate_all, fppi_all = mr_fppi(detections_all, ground_truth)
+        all_lamr = lamr(miss_rate_all, fppi_all)
+        # day
+        miss_rate_day, fppi_day = mr_fppi(detections_day, ground_truth_day)
+        day_lamr = lamr(miss_rate_day, fppi_day)
+        # night
+        miss_rate_night, fppi_night = mr_fppi(detections_night, ground_truth_night)
+        night_lamr = lamr(miss_rate_night, fppi_night)
+
+        # msg = 'Task-LAMR All @[IOU=0.5] = {:.3f}\n'.format(all_lamr) \
+        #     + 'Task-LAMR Day @[IOU=0.5] = {:.3f}\n'.format(day_lamr) \
+        #     + 'Task-LAMR Night @[IOU=0.5] = {:.3f}\n'.format(night_lamr)
+        # print(msg)
+        os.remove(json_result_file)
+        return [all_lamr, day_lamr, night_lamr]
+
+    # def evaluate_kaist_mr(self, kaistGt, kaistDt_file, modal, logger=None):
+        
+    #     kaistDt = kaistGt.loadRes(kaistDt_file)
+    #     imgIds = sorted(kaistGt.getImgIds())
+    #     kaistEval = KAISTPedEval(kaistGt, kaistDt, 'bbox')
+        
+    #     kaistEval.params.catIds = [1]
+
+    #     eval_result = {
+    #     'all': copy.deepcopy(kaistEval),
+    #     'day': copy.deepcopy(kaistEval),
+    #     'night': copy.deepcopy(kaistEval),
+    #     }
+
+    #     eval_result['all'].params.imgIds = imgIds
+    #     eval_result['all'].evaluate(0)
+    #     eval_result['all'].accumulate()
+    #     MR_all = eval_result['all'].summarize(0)
+
+    #     eval_result['day'].params.imgIds = imgIds[:1455]
+    #     eval_result['day'].evaluate(0)
+    #     eval_result['day'].accumulate()
+    #     MR_day = eval_result['day'].summarize(0)
+
+    #     eval_result['night'].params.imgIds = imgIds[1455:]
+    #     eval_result['night'].evaluate(0)
+    #     eval_result['night'].accumulate()
+    #     MR_night = eval_result['night'].summarize(0)
+
+    #     recall_all = 1 - eval_result['all'].eval['yy'][0][-1]
+        
+    #     msg = f'\n############# Modal: {modal} #############\n' \
+    #         + f'MR_all: {MR_all * 100:.2f}\n' \
+    #         + f'MR_day: {MR_day * 100:.2f}\n' \
+    #         + f'MR_night: {MR_night * 100:.2f}\n' \
+    #         + f'recall_all: {recall_all * 100:.2f}\n' \
+    #         + '######################################\n\n'
+    #     print_log(msg, logger=logger)
+
+    #     return eval_result
     
     @staticmethod
     def get_single_gt(ori_coco_gt, modal_pos):
@@ -459,466 +589,494 @@ class GneralKaist(CustomDataset):
         return ori_coco_gt
 
 
-class KAISTPedEval(COCOeval):
+def lamr(miss_rate, fppi, num_of_samples=9):
+    """ Compute the log average miss-rate from a given MR-FPPI curve.
+    The log average miss-rate is defined as the average of a number of evenly spaced log miss-rate samples
+    on the :math:`{log}(FPPI)` axis within the range :math:`[10^{-2}, 10^{0}]`
 
-    def __init__(self, kaistGt=None, kaistDt=None, iouType='bbox', method='unknown'):
-        '''
-        Initialize CocoEval using coco APIs for gt and dt
-        :param cocoGt: coco object with ground truth annotations
-        :param cocoDt: coco object with detection results
-        :return: None
-        '''
-        super().__init__(kaistGt, kaistDt, iouType)
+    Args:
+        miss_rate (list): miss-rate values
+        fppi (list): FPPI values
+        num_of_samples (int, optional): Number of samples to take from the curve to measure the average precision; Default **9**
 
-        self.params = KAISTParams(iouType=iouType)   # parameters
-        self.method = method
+    Returns:
+        Number: log average miss-rate
+    """
+    samples = np.logspace(-2., 0., num_of_samples)
+    m = np.array(miss_rate)
+    f = np.array(fppi)
+    interpolated = scipy.interpolate.interp1d(f, m, fill_value=(1., 0.), bounds_error=False)(samples)
+    for i, v in enumerate(interpolated):
+        if i == 0:
+            continue
+        if v <= 0:
+            interpolated[i] = interpolated[i-1]
 
-    def _prepare(self, id_setup):
-        '''
-        Prepare ._gts and ._dts for evaluation based on params
-        :return: None
-        '''
-        p = self.params
-        if p.useCats:
-            gts = self.cocoGt.loadAnns(self.cocoGt.getAnnIds(imgIds=p.imgIds, catIds=p.catIds))
-            dts = self.cocoDt.loadAnns(self.cocoDt.getAnnIds(imgIds=p.imgIds, catIds=p.catIds))
-        else:
-            gts = self.cocoGt.loadAnns(self.cocoGt.getAnnIds(imgIds=p.imgIds))
-            dts = self.cocoDt.loadAnns(self.cocoDt.getAnnIds(imgIds=p.imgIds))
+    log_interpolated = np.log(interpolated)
+    avg = sum(log_interpolated) / len(log_interpolated)
+    return np.exp(avg)
 
-        # set ignore flag
-        for gt in gts:
-            gt['ignore'] = gt['ignore'] if 'ignore' in gt else 0
-            gbox = gt['bbox']
-            gt['ignore'] = 1 \
-                if gt['height'] < self.params.HtRng[id_setup][0] \
-                or gt['height'] > self.params.HtRng[id_setup][1] \
-                or gt['occlusion'] not in self.params.OccRng[id_setup] \
-                or gbox[0] < self.params.bndRng[0] \
-                or gbox[1] < self.params.bndRng[1] \
-                or gbox[0] + gbox[2] > self.params.bndRng[2] \
-                or gbox[1] + gbox[3] > self.params.bndRng[3] \
-                else gt['ignore']
 
-        self._gts = defaultdict(list)       # gt for evaluation
-        self._dts = defaultdict(list)       # dt for evaluation
-        for gt in gts:
-            self._gts[gt['image_id'], gt['category_id']].append(gt)
-        for dt in dts:
-            self._dts[dt['image_id'], dt['category_id']].append(dt)
+# class KAISTPedEval(COCOeval):
 
-        self.evalImgs = defaultdict(list)   # per-image per-category evaluation results
-        self.eval = {}                      # accumulated evaluation results
+#     def __init__(self, kaistGt=None, kaistDt=None, iouType='bbox', method='unknown'):
+#         '''
+#         Initialize CocoEval using coco APIs for gt and dt
+#         :param cocoGt: coco object with ground truth annotations
+#         :param cocoDt: coco object with detection results
+#         :return: None
+#         '''
+#         super().__init__(kaistGt, kaistDt, iouType)
 
-    def evaluate(self, id_setup):
-        '''
-        Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
-        :return: None
-        '''
-        p = self.params
-        # add backward compatibility if useSegm is specified in params
-        if p.useSegm is not None:
-            p.iouType = 'segm' if p.useSegm == 1 else 'bbox'
-            print('useSegm (deprecated) is not None. Running {} evaluation'.format(p.iouType))
-        # print('Evaluate annotation type *{}*'.format(p.iouType))
-        p.imgIds = list(np.unique(p.imgIds))
-        if p.useCats:
-            p.catIds = list(np.unique(p.catIds))
-        p.maxDets = sorted(p.maxDets)
-        self.params = p
+#         self.params = KAISTParams(iouType=iouType)   # parameters
+#         self.method = method
 
-        self._prepare(id_setup)
-        # loop through images, area range, max detection number
-        catIds = p.catIds if p.useCats else [-1]
+#     def _prepare(self, id_setup):
+#         '''
+#         Prepare ._gts and ._dts for evaluation based on params
+#         :return: None
+#         '''
+#         p = self.params
+#         if p.useCats:
+#             gts = self.cocoGt.loadAnns(self.cocoGt.getAnnIds(imgIds=p.imgIds, catIds=p.catIds))
+#             dts = self.cocoDt.loadAnns(self.cocoDt.getAnnIds(imgIds=p.imgIds, catIds=p.catIds))
+#         else:
+#             gts = self.cocoGt.loadAnns(self.cocoGt.getAnnIds(imgIds=p.imgIds))
+#             dts = self.cocoDt.loadAnns(self.cocoDt.getAnnIds(imgIds=p.imgIds))
 
-        computeIoU = self.computeIoU
+#         # set ignore flag
+#         for gt in gts:
+#             gt['ignore'] = gt['ignore'] if 'ignore' in gt else 0
+#             gbox = gt['bbox']
+#             gt['ignore'] = 1 \
+#                 if gt['height'] < self.params.HtRng[id_setup][0] \
+#                 or gt['height'] > self.params.HtRng[id_setup][1] \
+#                 or gt['occlusion'] not in self.params.OccRng[id_setup] \
+#                 or gbox[0] < self.params.bndRng[0] \
+#                 or gbox[1] < self.params.bndRng[1] \
+#                 or gbox[0] + gbox[2] > self.params.bndRng[2] \
+#                 or gbox[1] + gbox[3] > self.params.bndRng[3] \
+#                 else gt['ignore']
 
-        self.ious = {(imgId, catId): computeIoU(imgId, catId)
-                     for imgId in p.imgIds for catId in catIds}
+#         self._gts = defaultdict(list)       # gt for evaluation
+#         self._dts = defaultdict(list)       # dt for evaluation
+#         for gt in gts:
+#             self._gts[gt['image_id'], gt['category_id']].append(gt)
+#         for dt in dts:
+#             self._dts[dt['image_id'], dt['category_id']].append(dt)
 
-        evaluateImg = self.evaluateImg
-        maxDet = p.maxDets[-1]
-        HtRng = self.params.HtRng[id_setup]
-        OccRng = self.params.OccRng[id_setup]
-        self.evalImgs = [evaluateImg(imgId, catId, HtRng, OccRng, maxDet)
-                         for catId in catIds
-                         for imgId in p.imgIds]
+#         self.evalImgs = defaultdict(list)   # per-image per-category evaluation results
+#         self.eval = {}                      # accumulated evaluation results
 
-        self._paramsEval = copy.deepcopy(self.params)
+#     def evaluate(self, id_setup):
+#         '''
+#         Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
+#         :return: None
+#         '''
+#         p = self.params
+#         # add backward compatibility if useSegm is specified in params
+#         if p.useSegm is not None:
+#             p.iouType = 'segm' if p.useSegm == 1 else 'bbox'
+#             print('useSegm (deprecated) is not None. Running {} evaluation'.format(p.iouType))
+#         # print('Evaluate annotation type *{}*'.format(p.iouType))
+#         p.imgIds = list(np.unique(p.imgIds))
+#         if p.useCats:
+#             p.catIds = list(np.unique(p.catIds))
+#         p.maxDets = sorted(p.maxDets)
+#         self.params = p
 
-    def computeIoU(self, imgId, catId):
-        p = self.params
-        if p.useCats:
-            gt = self._gts[imgId, catId]
-            dt = self._dts[imgId, catId]
-        else:
-            gt = [_ for cId in p.catIds for _ in self._gts[imgId, cId]]
-            dt = [_ for cId in p.catIds for _ in self._dts[imgId, cId]]
-        if len(gt) == 0 and len(dt) == 0:
-            return []
-        inds = np.argsort([-d['score'] for d in dt], kind='mergesort')
-        dt = [dt[i] for i in inds]
-        if len(dt) > p.maxDets[-1]:
-            dt = dt[0:p.maxDets[-1]]
+#         self._prepare(id_setup)
+#         # loop through images, area range, max detection number
+#         catIds = p.catIds if p.useCats else [-1]
 
-        if p.iouType == 'segm':
-            g = [g['segmentation'] for g in gt]
-            d = [d['segmentation'] for d in dt]
-        elif p.iouType == 'bbox':
-            g = [g['bbox'] for g in gt]
-            d = [d['bbox'] for d in dt]
-        else:
-            raise Exception('unknown iouType for iou computation')
+#         computeIoU = self.computeIoU
 
-        # compute iou between each dt and gt region
-        iscrowd = [int(o['ignore']) for o in gt]
-        ious = self.iou(d, g, iscrowd)
-        return ious
+#         self.ious = {(imgId, catId): computeIoU(imgId, catId)
+#                      for imgId in p.imgIds for catId in catIds}
 
-    def iou(self, dts, gts, pyiscrowd):
-        dts = np.asarray(dts)
-        gts = np.asarray(gts)
-        pyiscrowd = np.asarray(pyiscrowd)
-        ious = np.zeros((len(dts), len(gts)))
-        for j, gt in enumerate(gts):
-            gx1 = gt[0]
-            gy1 = gt[1]
-            gx2 = gt[0] + gt[2]
-            gy2 = gt[1] + gt[3]
-            garea = gt[2] * gt[3]
-            for i, dt in enumerate(dts):
-                dx1 = dt[0]
-                dy1 = dt[1]
-                dx2 = dt[0] + dt[2]
-                dy2 = dt[1] + dt[3]
-                darea = dt[2] * dt[3]
+#         evaluateImg = self.evaluateImg
+#         maxDet = p.maxDets[-1]
+#         HtRng = self.params.HtRng[id_setup]
+#         OccRng = self.params.OccRng[id_setup]
+#         self.evalImgs = [evaluateImg(imgId, catId, HtRng, OccRng, maxDet)
+#                          for catId in catIds
+#                          for imgId in p.imgIds]
 
-                unionw = min(dx2, gx2) - max(dx1, gx1)
-                if unionw <= 0:
-                    continue
-                unionh = min(dy2, gy2) - max(dy1, gy1)
-                if unionh <= 0:
-                    continue
-                t = unionw * unionh
-                if pyiscrowd[j]:
-                    unionarea = darea
-                else:
-                    unionarea = darea + garea - t
+#         self._paramsEval = copy.deepcopy(self.params)
 
-                ious[i, j] = float(t) / unionarea
-        return ious
+#     def computeIoU(self, imgId, catId):
+#         p = self.params
+#         if p.useCats:
+#             gt = self._gts[imgId, catId]
+#             dt = self._dts[imgId, catId]
+#         else:
+#             gt = [_ for cId in p.catIds for _ in self._gts[imgId, cId]]
+#             dt = [_ for cId in p.catIds for _ in self._dts[imgId, cId]]
+#         if len(gt) == 0 and len(dt) == 0:
+#             return []
+#         inds = np.argsort([-d['score'] for d in dt], kind='mergesort')
+#         dt = [dt[i] for i in inds]
+#         if len(dt) > p.maxDets[-1]:
+#             dt = dt[0:p.maxDets[-1]]
 
-    def evaluateImg(self, imgId, catId, hRng, oRng, maxDet):
-        '''
-        perform evaluation for single category and image
-        :return: dict (single image results)
-        '''
-        try:
-            p = self.params
-            if p.useCats:
-                gt = self._gts[imgId, catId]
-                dt = self._dts[imgId, catId]
-            else:
-                gt = [_ for cId in p.catIds for _ in self._gts[imgId, cId]]
-                dt = [_ for cId in p.catIds for _ in self._dts[imgId, cId]]
+#         if p.iouType == 'segm':
+#             g = [g['segmentation'] for g in gt]
+#             d = [d['segmentation'] for d in dt]
+#         elif p.iouType == 'bbox':
+#             g = [g['bbox'] for g in gt]
+#             d = [d['bbox'] for d in dt]
+#         else:
+#             raise Exception('unknown iouType for iou computation')
+
+#         # compute iou between each dt and gt region
+#         iscrowd = [int(o['ignore']) for o in gt]
+#         ious = self.iou(d, g, iscrowd)
+#         return ious
+
+#     def iou(self, dts, gts, pyiscrowd):
+#         dts = np.asarray(dts)
+#         gts = np.asarray(gts)
+#         pyiscrowd = np.asarray(pyiscrowd)
+#         ious = np.zeros((len(dts), len(gts)))
+#         for j, gt in enumerate(gts):
+#             gx1 = gt[0]
+#             gy1 = gt[1]
+#             gx2 = gt[0] + gt[2]
+#             gy2 = gt[1] + gt[3]
+#             garea = gt[2] * gt[3]
+#             for i, dt in enumerate(dts):
+#                 dx1 = dt[0]
+#                 dy1 = dt[1]
+#                 dx2 = dt[0] + dt[2]
+#                 dy2 = dt[1] + dt[3]
+#                 darea = dt[2] * dt[3]
+
+#                 unionw = min(dx2, gx2) - max(dx1, gx1)
+#                 if unionw <= 0:
+#                     continue
+#                 unionh = min(dy2, gy2) - max(dy1, gy1)
+#                 if unionh <= 0:
+#                     continue
+#                 t = unionw * unionh
+#                 if pyiscrowd[j]:
+#                     unionarea = darea
+#                 else:
+#                     unionarea = darea + garea - t
+
+#                 ious[i, j] = float(t) / unionarea
+#         return ious
+
+#     def evaluateImg(self, imgId, catId, hRng, oRng, maxDet):
+#         '''
+#         perform evaluation for single category and image
+#         :return: dict (single image results)
+#         '''
+#         try:
+#             p = self.params
+#             if p.useCats:
+#                 gt = self._gts[imgId, catId]
+#                 dt = self._dts[imgId, catId]
+#             else:
+#                 gt = [_ for cId in p.catIds for _ in self._gts[imgId, cId]]
+#                 dt = [_ for cId in p.catIds for _ in self._dts[imgId, cId]]
             
-            if len(gt) == 0 and len(dt) == 0:
-                return None
+#             if len(gt) == 0 and len(dt) == 0:
+#                 return None
 
-            for g in gt:
-                if g['ignore']:
-                    g['_ignore'] = 1
-                else:
-                    g['_ignore'] = 0
+#             for g in gt:
+#                 if g['ignore']:
+#                     g['_ignore'] = 1
+#                 else:
+#                     g['_ignore'] = 0
 
-            # sort dt highest score first, sort gt ignore last
-            gtind = np.argsort([g['_ignore'] for g in gt], kind='mergesort')
-            gt = [gt[i] for i in gtind]
-            dtind = np.argsort([-d['score'] for d in dt], kind='mergesort')
-            dt = [dt[i] for i in dtind[0:maxDet]]
+#             # sort dt highest score first, sort gt ignore last
+#             gtind = np.argsort([g['_ignore'] for g in gt], kind='mergesort')
+#             gt = [gt[i] for i in gtind]
+#             dtind = np.argsort([-d['score'] for d in dt], kind='mergesort')
+#             dt = [dt[i] for i in dtind[0:maxDet]]
 
-            if len(dt) == 0:
-                return None
+#             if len(dt) == 0:
+#                 return None
 
-            # load computed ious        
-            ious = self.ious[imgId, catId][dtind, :] if len(self.ious[imgId, catId]) > 0 else self.ious[imgId, catId]
-            ious = ious[:, gtind]
+#             # load computed ious        
+#             ious = self.ious[imgId, catId][dtind, :] if len(self.ious[imgId, catId]) > 0 else self.ious[imgId, catId]
+#             ious = ious[:, gtind]
 
-            T = len(p.iouThrs)
-            G = len(gt)
-            D = len(dt)
-            gtm = np.zeros((T, G))
-            dtm = np.zeros((T, D))
-            gtIg = np.array([g['_ignore'] for g in gt])
-            dtIg = np.zeros((T, D))
+#             T = len(p.iouThrs)
+#             G = len(gt)
+#             D = len(dt)
+#             gtm = np.zeros((T, G))
+#             dtm = np.zeros((T, D))
+#             gtIg = np.array([g['_ignore'] for g in gt])
+#             dtIg = np.zeros((T, D))
 
-            if not len(ious) == 0:
-                for tind, t in enumerate(p.iouThrs):
-                    for dind, d in enumerate(dt):
-                        # information about best match so far (m=-1 -> unmatched)
-                        iou = min([t, 1 - 1e-10])
-                        bstOa = iou
-                        bstg = -2
-                        bstm = -2
-                        for gind, g in enumerate(gt):
-                            m = gtm[tind, gind]
-                            # if this gt already matched, and not a crowd, continue
-                            if m > 0:
-                                continue
-                            # if dt matched to reg gt, and on ignore gt, stop
-                            if bstm != -2 and gtIg[gind] == 1:
-                                break
-                            # continue to next gt unless better match made
-                            if ious[dind, gind] < bstOa:
-                                continue
-                            # if match successful and best so far, store appropriately
-                            bstOa = ious[dind, gind]
-                            bstg = gind
-                            if gtIg[gind] == 0:
-                                bstm = 1
-                            else:
-                                bstm = -1
+#             if not len(ious) == 0:
+#                 for tind, t in enumerate(p.iouThrs):
+#                     for dind, d in enumerate(dt):
+#                         # information about best match so far (m=-1 -> unmatched)
+#                         iou = min([t, 1 - 1e-10])
+#                         bstOa = iou
+#                         bstg = -2
+#                         bstm = -2
+#                         for gind, g in enumerate(gt):
+#                             m = gtm[tind, gind]
+#                             # if this gt already matched, and not a crowd, continue
+#                             if m > 0:
+#                                 continue
+#                             # if dt matched to reg gt, and on ignore gt, stop
+#                             if bstm != -2 and gtIg[gind] == 1:
+#                                 break
+#                             # continue to next gt unless better match made
+#                             if ious[dind, gind] < bstOa:
+#                                 continue
+#                             # if match successful and best so far, store appropriately
+#                             bstOa = ious[dind, gind]
+#                             bstg = gind
+#                             if gtIg[gind] == 0:
+#                                 bstm = 1
+#                             else:
+#                                 bstm = -1
 
-                        # if match made store id of match for both dt and gt
-                        if bstg == -2:
-                            continue
-                        dtIg[tind, dind] = gtIg[bstg]
-                        dtm[tind, dind] = gt[bstg]['id']
-                        if bstm == 1:
-                            gtm[tind, bstg] = d['id']
+#                         # if match made store id of match for both dt and gt
+#                         if bstg == -2:
+#                             continue
+#                         dtIg[tind, dind] = gtIg[bstg]
+#                         dtm[tind, dind] = gt[bstg]['id']
+#                         if bstm == 1:
+#                             gtm[tind, bstg] = d['id']
 
-        except Exception:
+#         except Exception:
 
-            ex_type, ex_value, ex_traceback = sys.exc_info()            
+#             ex_type, ex_value, ex_traceback = sys.exc_info()            
 
-            # Extract unformatter stack traces as tuples
-            trace_back = traceback.extract_tb(ex_traceback)
+#             # Extract unformatter stack traces as tuples
+#             trace_back = traceback.extract_tb(ex_traceback)
 
-            # Format stacktrace
-            stack_trace = list()
+#             # Format stacktrace
+#             stack_trace = list()
 
-            for trace in trace_back:
-                stack_trace.append("File : %s , Line : %d, Func.Name : %s, Message : %s" % (trace[0], trace[1], trace[2], trace[3]))
+#             for trace in trace_back:
+#                 stack_trace.append("File : %s , Line : %d, Func.Name : %s, Message : %s" % (trace[0], trace[1], trace[2], trace[3]))
 
-            sys.stderr.write("[Error] Exception type : %s \n" % ex_type.__name__)
-            sys.stderr.write("[Error] Exception message : %s \n" % ex_value)
-            for trace in stack_trace:
-                sys.stderr.write("[Error] (Stack trace) %s\n" % trace)
+#             sys.stderr.write("[Error] Exception type : %s \n" % ex_type.__name__)
+#             sys.stderr.write("[Error] Exception message : %s \n" % ex_value)
+#             for trace in stack_trace:
+#                 sys.stderr.write("[Error] (Stack trace) %s\n" % trace)
 
-            pdb.set_trace()
+#             pdb.set_trace()
 
-        # store results for given image and category
-        return {
-            'image_id': imgId,
-            'category_id': catId,
-            'hRng': hRng,
-            'oRng': oRng,
-            'maxDet': maxDet,
-            'dtIds': [d['id'] for d in dt],
-            'gtIds': [g['id'] for g in gt],
-            'dtMatches': dtm,
-            'gtMatches': gtm,
-            'dtScores': [d['score'] for d in dt],
-            'gtIgnore': gtIg,
-            'dtIgnore': dtIg,
-        }
+#         # store results for given image and category
+#         return {
+#             'image_id': imgId,
+#             'category_id': catId,
+#             'hRng': hRng,
+#             'oRng': oRng,
+#             'maxDet': maxDet,
+#             'dtIds': [d['id'] for d in dt],
+#             'gtIds': [g['id'] for g in gt],
+#             'dtMatches': dtm,
+#             'gtMatches': gtm,
+#             'dtScores': [d['score'] for d in dt],
+#             'gtIgnore': gtIg,
+#             'dtIgnore': dtIg,
+#         }
 
-    def accumulate(self, p=None):
-        '''
-        Accumulate per image evaluation results and store the result in self.eval
-        :param p: input params for evaluation
-        :return: None
-        '''
-        if not self.evalImgs:
-            print('Please run evaluate() first')
-        # allows input customized parameters
-        if p is None:
-            p = self.params
-        p.catIds = p.catIds if p.useCats == 1 else [-1]
-        T = len(p.iouThrs)
-        R = len(p.fppiThrs)
-        K = len(p.catIds) if p.useCats else 1
-        M = len(p.maxDets)
-        ys = -np.ones((T, R, K, M))     # -1 for the precision of absent categories
+#     def accumulate(self, p=None):
+#         '''
+#         Accumulate per image evaluation results and store the result in self.eval
+#         :param p: input params for evaluation
+#         :return: None
+#         '''
+#         if not self.evalImgs:
+#             print('Please run evaluate() first')
+#         # allows input customized parameters
+#         if p is None:
+#             p = self.params
+#         p.catIds = p.catIds if p.useCats == 1 else [-1]
+#         T = len(p.iouThrs)
+#         R = len(p.fppiThrs)
+#         K = len(p.catIds) if p.useCats else 1
+#         M = len(p.maxDets)
+#         ys = -np.ones((T, R, K, M))     # -1 for the precision of absent categories
 
-        xx_graph = []
-        yy_graph = []
+#         xx_graph = []
+#         yy_graph = []
 
-        # create dictionary for future indexing
-        _pe = self._paramsEval
-        catIds = [1]                    # _pe.catIds if _pe.useCats else [-1]
-        setK = set(catIds)
-        setM = set(_pe.maxDets)
-        setI = set(_pe.imgIds)
-        # get inds to evaluate
-        k_list = [n for n, k in enumerate(p.catIds) if k in setK]
-        m_list = [m for n, m in enumerate(p.maxDets) if m in setM]
-        i_list = [n for n, i in enumerate(p.imgIds) if i in setI]
-        I0 = len(_pe.imgIds)
+#         # create dictionary for future indexing
+#         _pe = self._paramsEval
+#         catIds = [1]                    # _pe.catIds if _pe.useCats else [-1]
+#         setK = set(catIds)
+#         setM = set(_pe.maxDets)
+#         setI = set(_pe.imgIds)
+#         # get inds to evaluate
+#         k_list = [n for n, k in enumerate(p.catIds) if k in setK]
+#         m_list = [m for n, m in enumerate(p.maxDets) if m in setM]
+#         i_list = [n for n, i in enumerate(p.imgIds) if i in setI]
+#         I0 = len(_pe.imgIds)
         
-        # retrieve E at each category, area range, and max number of detections
-        for k, k0 in enumerate(k_list):
-            Nk = k0 * I0
-            for m, maxDet in enumerate(m_list):
-                E = [self.evalImgs[Nk + i] for i in i_list]
-                E = [e for e in E if e is not None]
-                if len(E) == 0:
-                    continue
+#         # retrieve E at each category, area range, and max number of detections
+#         for k, k0 in enumerate(k_list):
+#             Nk = k0 * I0
+#             for m, maxDet in enumerate(m_list):
+#                 E = [self.evalImgs[Nk + i] for i in i_list]
+#                 E = [e for e in E if e is not None]
+#                 if len(E) == 0:
+#                     continue
 
-                dtScores = np.concatenate([e['dtScores'][0:maxDet] for e in E])
+#                 dtScores = np.concatenate([e['dtScores'][0:maxDet] for e in E])
 
-                # different sorting method generates slightly different results.
-                # mergesort is used to be consistent as Matlab implementation.
+#                 # different sorting method generates slightly different results.
+#                 # mergesort is used to be consistent as Matlab implementation.
 
-                inds = np.argsort(-dtScores, kind='mergesort')
+#                 inds = np.argsort(-dtScores, kind='mergesort')
 
-                dtm = np.concatenate([e['dtMatches'][:, 0:maxDet] for e in E], axis=1)[:, inds]
-                dtIg = np.concatenate([e['dtIgnore'][:, 0:maxDet] for e in E], axis=1)[:, inds]
-                gtIg = np.concatenate([e['gtIgnore'] for e in E])
-                npig = np.count_nonzero(gtIg == 0)
-                if npig == 0:
-                    continue
-                tps = np.logical_and(dtm, np.logical_not(dtIg))
-                fps = np.logical_and(np.logical_not(dtm), np.logical_not(dtIg))
-                inds = np.where(dtIg == 0)[1]
-                tps = tps[:, inds]
-                fps = fps[:, inds]
+#                 dtm = np.concatenate([e['dtMatches'][:, 0:maxDet] for e in E], axis=1)[:, inds]
+#                 dtIg = np.concatenate([e['dtIgnore'][:, 0:maxDet] for e in E], axis=1)[:, inds]
+#                 gtIg = np.concatenate([e['gtIgnore'] for e in E])
+#                 npig = np.count_nonzero(gtIg == 0)
+#                 if npig == 0:
+#                     continue
+#                 tps = np.logical_and(dtm, np.logical_not(dtIg))
+#                 fps = np.logical_and(np.logical_not(dtm), np.logical_not(dtIg))
+#                 inds = np.where(dtIg == 0)[1]
+#                 tps = tps[:, inds]
+#                 fps = fps[:, inds]
 
-                tp_sum = np.cumsum(tps, axis=1).astype(dtype=np.float64)
-                fp_sum = np.cumsum(fps, axis=1).astype(dtype=np.float64)
+#                 tp_sum = np.cumsum(tps, axis=1).astype(dtype=np.float64)
+#                 fp_sum = np.cumsum(fps, axis=1).astype(dtype=np.float64)
             
-                for t, (tp, fp) in enumerate(zip(tp_sum, fp_sum)):
-                    tp = np.array(tp)
-                    fppi = np.array(fp) / I0
-                    nd = len(tp)
-                    recall = tp / npig
-                    q = np.zeros((R,))
+#                 for t, (tp, fp) in enumerate(zip(tp_sum, fp_sum)):
+#                     tp = np.array(tp)
+#                     fppi = np.array(fp) / I0
+#                     nd = len(tp)
+#                     recall = tp / npig
+#                     q = np.zeros((R,))
 
-                    xx_graph.append(fppi)
-                    yy_graph.append(1 - recall)
+#                     xx_graph.append(fppi)
+#                     yy_graph.append(1 - recall)
 
-                    # numpy is slow without cython optimization for accessing elements
-                    # use python array gets significant speed improvement
-                    recall = recall.tolist()
-                    q = q.tolist()
+#                     # numpy is slow without cython optimization for accessing elements
+#                     # use python array gets significant speed improvement
+#                     recall = recall.tolist()
+#                     q = q.tolist()
 
-                    for i in range(nd - 1, 0, -1):
-                        if recall[i] < recall[i - 1]:
-                            recall[i - 1] = recall[i]
+#                     for i in range(nd - 1, 0, -1):
+#                         if recall[i] < recall[i - 1]:
+#                             recall[i - 1] = recall[i]
 
-                    inds = np.searchsorted(fppi, p.fppiThrs, side='right') - 1
-                    try:
-                        for ri, pi in enumerate(inds):
-                            q[ri] = recall[pi]
-                    except Exception:
-                        pass
-                    ys[t, :, k, m] = np.array(q)
+#                     inds = np.searchsorted(fppi, p.fppiThrs, side='right') - 1
+#                     try:
+#                         for ri, pi in enumerate(inds):
+#                             q[ri] = recall[pi]
+#                     except Exception:
+#                         pass
+#                     ys[t, :, k, m] = np.array(q)
         
-        self.eval = {
-            'params': p,
-            'counts': [T, R, K, M],
-            'date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'TP': ys,
-            'xx': xx_graph,
-            'yy': yy_graph
-        }
+#         self.eval = {
+#             'params': p,
+#             'counts': [T, R, K, M],
+#             'date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+#             'TP': ys,
+#             'xx': xx_graph,
+#             'yy': yy_graph
+#         }
 
-    @staticmethod
-    def draw_figure(ax, eval_results, methods, colors):
-        """Draw figure"""
-        assert len(eval_results) == len(methods) == len(colors)
+#     @staticmethod
+#     def draw_figure(ax, eval_results, methods, colors):
+#         """Draw figure"""
+#         assert len(eval_results) == len(methods) == len(colors)
 
-        for eval_result, method, color in zip(eval_results, methods, colors):
-            mrs = 1 - eval_result['TP']
-            mean_s = np.log(mrs[mrs < 2])
-            mean_s = np.mean(mean_s)
-            mean_s = float(np.exp(mean_s) * 100)
+#         for eval_result, method, color in zip(eval_results, methods, colors):
+#             mrs = 1 - eval_result['TP']
+#             mean_s = np.log(mrs[mrs < 2])
+#             mean_s = np.mean(mean_s)
+#             mean_s = float(np.exp(mean_s) * 100)
 
-            xx = eval_result['xx']
-            yy = eval_result['yy']
+#             xx = eval_result['xx']
+#             yy = eval_result['yy']
 
-            ax.plot(xx[0], yy[0], color=color, linewidth=3, label=f'{mean_s:.2f}%, {method}')
+#             ax.plot(xx[0], yy[0], color=color, linewidth=3, label=f'{mean_s:.2f}%, {method}')
 
-        ax.set_yscale('log')
-        ax.set_xscale('log')
-        ax.legend()
+#         ax.set_yscale('log')
+#         ax.set_xscale('log')
+#         ax.legend()
 
-        yt = [1, 5] + list(range(10, 60, 10)) + [64, 80]
-        yticklabels = ['.{:02d}'.format(num) for num in yt]
+#         yt = [1, 5] + list(range(10, 60, 10)) + [64, 80]
+#         yticklabels = ['.{:02d}'.format(num) for num in yt]
 
-        yt += [100]
-        yt = [yy / 100.0 for yy in yt]
-        yticklabels += [1]
+#         yt += [100]
+#         yt = [yy / 100.0 for yy in yt]
+#         yticklabels += [1]
         
-        ax.set_yticks(yt)
-        ax.set_yticklabels(yticklabels)
-        ax.grid(which='major', axis='both')
-        ax.set_ylim(0.01, 1)
-        ax.set_xlim(2e-4, 50)
-        ax.set_ylabel('miss rate')
-        ax.set_xlabel('false positives per image')
+#         ax.set_yticks(yt)
+#         ax.set_yticklabels(yticklabels)
+#         ax.grid(which='major', axis='both')
+#         ax.set_ylim(0.01, 1)
+#         ax.set_xlim(2e-4, 50)
+#         ax.set_ylabel('miss rate')
+#         ax.set_xlabel('false positives per image')
 
-    def summarize(self, id_setup, res_file=None):
-        '''
-        Compute and display summary metrics for evaluation results.
-        Note this functin can *only* be applied on the default parameter setting
-        '''
-        def _summarize(iouThr=None, maxDets=100):
-            OCC_TO_TEXT = ['none', 'partial_occ', 'heavy_occ']
+#     def summarize(self, id_setup, res_file=None):
+#         '''
+#         Compute and display summary metrics for evaluation results.
+#         Note this functin can *only* be applied on the default parameter setting
+#         '''
+#         def _summarize(iouThr=None, maxDets=100):
+#             OCC_TO_TEXT = ['none', 'partial_occ', 'heavy_occ']
 
-            p = self.params
-            iStr = ' {:<18} {} @ {:<18} [ IoU={:<9} | height={:>6s} | visibility={:>6s} ] = {:0.2f}%'
-            titleStr = 'Average Miss Rate'
-            typeStr = '(MR)'
-            setupStr = p.SetupLbl[id_setup]
-            iouStr = '{:0.2f}:{:0.2f}'.format(p.iouThrs[0], p.iouThrs[-1]) \
-                if iouThr is None else '{:0.2f}'.format(iouThr)
-            heightStr = '[{:0.0f}:{:0.0f}]'.format(p.HtRng[id_setup][0], p.HtRng[id_setup][1])
-            occlStr = '[' + '+'.join(['{:s}'.format(OCC_TO_TEXT[occ]) for occ in p.OccRng[id_setup]]) + ']'
+#             p = self.params
+#             iStr = ' {:<18} {} @ {:<18} [ IoU={:<9} | height={:>6s} | visibility={:>6s} ] = {:0.2f}%'
+#             titleStr = 'Average Miss Rate'
+#             typeStr = '(MR)'
+#             setupStr = p.SetupLbl[id_setup]
+#             iouStr = '{:0.2f}:{:0.2f}'.format(p.iouThrs[0], p.iouThrs[-1]) \
+#                 if iouThr is None else '{:0.2f}'.format(iouThr)
+#             heightStr = '[{:0.0f}:{:0.0f}]'.format(p.HtRng[id_setup][0], p.HtRng[id_setup][1])
+#             occlStr = '[' + '+'.join(['{:s}'.format(OCC_TO_TEXT[occ]) for occ in p.OccRng[id_setup]]) + ']'
 
-            mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
+#             mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
 
-            # dimension of precision: [TxRxKxAxM]
-            s = self.eval['TP']
-            # IoU
-            if iouThr is not None:
-                t = np.where(iouThr == p.iouThrs)[0]
-                s = s[t]
-            mrs = 1 - s[:, :, :, mind]
+#             # dimension of precision: [TxRxKxAxM]
+#             s = self.eval['TP']
+#             # IoU
+#             if iouThr is not None:
+#                 t = np.where(iouThr == p.iouThrs)[0]
+#                 s = s[t]
+#             mrs = 1 - s[:, :, :, mind]
 
-            if len(mrs[mrs < 2]) == 0:
-                mean_s = -1
-            else:
-                mean_s = np.log(mrs[mrs < 2])
-                mean_s = np.mean(mean_s)
-                mean_s = np.exp(mean_s)
+#             if len(mrs[mrs < 2]) == 0:
+#                 mean_s = -1
+#             else:
+#                 mean_s = np.log(mrs[mrs < 2])
+#                 mean_s = np.mean(mean_s)
+#                 mean_s = np.exp(mean_s)
 
-            if res_file:
-                res_file.write(iStr.format(titleStr, typeStr, setupStr, iouStr, heightStr, occlStr, mean_s * 100))
-                res_file.write('\n')
-            return mean_s
+#             if res_file:
+#                 res_file.write(iStr.format(titleStr, typeStr, setupStr, iouStr, heightStr, occlStr, mean_s * 100))
+#                 res_file.write('\n')
+#             return mean_s
 
-        if not self.eval:
-            raise Exception('Please run accumulate() first')
+#         if not self.eval:
+#             raise Exception('Please run accumulate() first')
         
-        return _summarize(iouThr=.5, maxDets=1000)
+#         return _summarize(iouThr=.5, maxDets=1000)
 
 
-class KAISTParams(Params):
-    """Params for KAISTPed evaluation api"""
+# class KAISTParams(Params):
+#     """Params for KAISTPed evaluation api"""
 
-    def setDetParams(self):
-        super().setDetParams()
+#     def setDetParams(self):
+#         super().setDetParams()
 
-        # Override variables for KAISTPed benchmark
-        self.iouThrs = np.array([0.5])
-        self.maxDets = [1000]
+#         # Override variables for KAISTPed benchmark
+#         self.iouThrs = np.array([0.5])
+#         self.maxDets = [1000]
 
-        # KAISTPed specific settings
-        self.fppiThrs = np.array([0.0100, 0.0178, 0.0316, 0.0562, 0.1000, 0.1778, 0.3162, 0.5623, 1.0000])
-        self.HtRng = [[55, 1e5 ** 2], [50, 75], [50, 1e5 ** 2], [20, 1e5 ** 2]]
-        self.OccRng = [[0, 1], [0, 1], [2], [0, 1, 2]]
-        self.SetupLbl = ['Reasonable', 'Reasonable_small', 'Reasonable_occ=heavy', 'All']
+#         # KAISTPed specific settings
+#         self.fppiThrs = np.array([0.0100, 0.0178, 0.0316, 0.0562, 0.1000, 0.1778, 0.3162, 0.5623, 1.0000])
+#         self.HtRng = [[55, 1e5 ** 2], [50, 75], [50, 1e5 ** 2], [20, 1e5 ** 2]]
+#         self.OccRng = [[0, 1], [0, 1], [2], [0, 1, 2]]
+#         self.SetupLbl = ['Reasonable', 'Reasonable_small', 'Reasonable_occ=heavy', 'All']
 
-        self.bndRng = [5, 5, 635, 507]  # discard bbs outside this pixel range
+#         self.bndRng = [5, 5, 635, 507]  # discard bbs outside this pixel range
 

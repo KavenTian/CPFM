@@ -14,13 +14,22 @@ def forward_vis_hook(module, data_input, data_output):
     fmap_vis.append(data_output)
     input_vis.append(data_input)
 
+def backward_vis_hook(module, grad_in, grad_out):
+    grad_vis.append(grad_out[0].detach())
+
 def forward_inf_hook(module, data_input, data_output):
     fmap_inf.append(data_output)
     input_inf.append(data_input)
 
+def backward_inf_hook(module, grad_in, grad_out):
+    grad_inf.append(grad_out[0].detach())
+
 def forward_pub_hook(module, data_input, data_output):
     fmap_pub.append(data_output)
     input_pub.append(data_input)
+
+def backward_pub_hook(module, grad_in, grad_out):
+    grad_pub.append(grad_out[0].detach())
 
 def show_fmap(fmap, img, save_name):
     img = mmcv.imread(img)
@@ -57,21 +66,29 @@ def parse_args():
     return args
 
 
-def main(args, fmap_block, input_block):
+def main(args, fmap_block, input_block, grads):
     # build the model from a config file and a checkpoint file
     model = init_detector(args.config, args.checkpoint, device=args.device)
-    model.backbone.stage2.register_forward_hook(forward_vis_hook)
-    model.backbone_lwir.stage2.register_forward_hook(forward_inf_hook)
-    if not args.with_neck:
-        model.backbone.stage2.register_forward_hook(forward_pub_hook)
-
+    # model.backbone.stage2.register_forward_hook(forward_vis_hook)
+    # model.backbone_lwir.stage2.register_forward_hook(forward_inf_hook)
+    # if not args.with_neck:
+    #     model.backbone.stage2.register_forward_hook(forward_pub_hook)
     # print(model.neck.out_convs[0])
+    
+    # model.backbone.stage4_s3.register_forward_hook(forward_pub_hook)
+    # model.backbone.stage4_s3.register_backward_hook(backward_pub_hook)
+    model.bbox_head.feat_align.register_forward_hook(forward_pub_hook)
 
+    # model.bbox_head.union_multi_level_reg_convs[0].register_backward_hook(backward_pub_hook)
     
     if args.img_vis.endswith(('.jpg', '.png')) and args.img_inf.endswith(('.jpg', '.png')):
         # test a single image
         imgs = [args.img_vis, args.img_inf]
         result = inference_rgbt_detector(model, imgs)
+        def f(x, i):
+            return x.permute(0, 3, 1, 2).reshape(1, -1, 64//(2**i), 80//(2**i))
+        reg_rgb = [f(fmap_block['pub'][i*4], i) for i in range(3)]
+        reg_tir = [f(fmap_block['pub'][i*4+1], i) for i in range(3)]
         # show the results
         # vis backbone
         show_fmap(fmap_block['vis'][0], args.img_vis, args.img_vis.split('/')[-1])
@@ -89,7 +106,7 @@ def main(args, fmap_block, input_block):
             result = inference_rgbt_detector(model, imgs)
             # show the results
             # vis backbone
-            save_dir = 'outputs/llvip/fmap/'
+            save_dir = 'work_dirs/fmap/'
             show_fmap(fmap_block['vis'][0], img_vis_list[i], save_dir +  img_vis_list[i].split('/')[-1].split('.')[0] + '_vis.jpg')
             show_fmap(fmap_block['inf'][0], img_inf_list[i], save_dir + img_inf_list[i].split('/')[-1].split('.')[0] + '_inf.jpg')
             if not args.with_neck:
@@ -122,8 +139,11 @@ async def async_main(args):
 if __name__ == '__main__':
     args = parse_args()
     fmap_vis = list()
+    grad_vis = list()
     fmap_inf = list()
+    grad_inf = list()
     fmap_pub = list()
+    grad_pub = list()
     input_vis = list()
     input_inf = list()
     input_pub = list()
@@ -137,8 +157,13 @@ if __name__ == '__main__':
         'inf':input_inf,
         'pub':input_pub
     }
+    grads = {
+        'vis':grad_vis,
+        "inf":grad_inf,
+        "pub":grad_pub
+    }
     if args.async_test:
         asyncio.run(async_main(args))
     else:
-        main(args, fmap, inputs)
+        main(args, fmap, inputs, grads)
 

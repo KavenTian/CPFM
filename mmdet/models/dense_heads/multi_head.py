@@ -878,14 +878,30 @@ class MultiSpeHead(YOLOXHead):
             rgb_bboxes = flatten_rgb_bboxes[img_id]
             tir_bboxes = flatten_tir_bboxes[img_id]
 
+            union_score_factor = flatten_obj_union[img_id]
+            union_bboxes = flatten_union_bboxes[img_id]
+
             result_list.append(
                 self.pair_bboxes_nms(rgb_cls_scores,
                                      tir_cls_scores,
                                      rgb_bboxes,
                                      tir_bboxes,
+                                     union_bboxes,
                                      rgb_score_factor,
                                      tir_score_factor,
+                                     union_score_factor,
                                      self.test_cfg))
+            # result_list.append(
+            #     self.anchor_nms(rgb_cls_scores,
+            #                     tir_cls_scores,
+            #                     rgb_bboxes,
+            #                     tir_bboxes,
+            #                     union_bboxes,
+            #                     rgb_score_factor,
+            #                     tir_score_factor,
+            #                     union_score_factor,
+            #                     self.test_cfg)
+            # )
 
         return result_list
 
@@ -894,8 +910,10 @@ class MultiSpeHead(YOLOXHead):
                         tir_cls_scores,
                         rgb_bboxes,
                         tir_bboxes,
+                        union_bboxes,
                         rgb_score_factor,
                         tir_score_factor,
+                        union_score_factor,
                         cfg):
         score_factor = torch.stack([rgb_score_factor, tir_score_factor], dim=-1)
         cls_scores = torch.stack([rgb_cls_scores, tir_cls_scores], dim=-1)
@@ -909,6 +927,7 @@ class MultiSpeHead(YOLOXHead):
 
         rgb_bboxes = rgb_bboxes[valid_mask]
         tir_bboxes = tir_bboxes[valid_mask]
+        union_bboxes = union_bboxes[valid_mask]
         
         modal_scores = score_factor[valid_mask] * cls_scores[valid_mask]
         anchor_scores = max_obj[valid_mask] * max_obj_cls[valid_mask]
@@ -932,6 +951,7 @@ class MultiSpeHead(YOLOXHead):
                    tir_bboxes.new_full((len(tir_bboxes), ), 0, dtype=torch.float32),\
                    labels,\
                    labels,\
+                   union_bboxes,\
                    anchor_scores
         else:
             _, keep = batched_nms(anchor_bboxes, anchor_scores, labels, cfg.nms)
@@ -939,11 +959,12 @@ class MultiSpeHead(YOLOXHead):
             bbox_mask = ~weight_mask[keep]
             rgb_bboxes = rgb_bboxes[keep]
             tir_bboxes = tir_bboxes[keep]
+            union_bboxes = union_bboxes[keep]
             anchor_scores = anchor_scores[keep]
             modal_scores = modal_scores[keep]
             labels = labels[keep]
 
-            assert len(anchor_scores) == len(person_ids) == len(labels)
+            assert len(anchor_scores) == len(person_ids) == len(labels) == len(union_bboxes)
             rgb_mask = bbox_mask[:, 0]
             tir_mask = bbox_mask[:, 1]
             assert len(rgb_bboxes) == len(rgb_mask)
@@ -956,8 +977,74 @@ class MultiSpeHead(YOLOXHead):
             rgb_labels = labels[rgb_mask]
             tir_labels = labels[tir_mask]
             assert len(rgb_labels) == len(rgb_bboxes) == len(rgb_scores) == len(rgb_ids)
-            assert len(tir_labels) == len(tir_bboxes) == len(tir_scores) == len(tir_ids)
-            
+            assert len(tir_labels) == len(tir_bboxes) == len(tir_scores) == len(tir_ids)           
             return rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores,\
-                   rgb_labels, tir_labels, anchor_scores
+                   rgb_labels, tir_labels, union_bboxes, anchor_scores
+
+            # union_ids = np.unique(np.concatenate([rgb_ids, tir_ids]))
+            # union_bboxes = union_bboxes[union_ids]
+            # anchor_scores = anchor_scores[union_ids]
+            # return rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores,\
+            #        rgb_labels, tir_labels, union_bboxes, anchor_scores
+
+    def anchor_nms(self, 
+                   rgb_cls_scores,
+                   tir_cls_scores,
+                   rgb_bboxes,
+                   tir_bboxes,
+                   union_bboxes,
+                   rgb_score_factor,
+                   tir_score_factor,
+                   union_score_factor,
+                   cfg):
+        valid_mask = union_score_factor >= cfg.score_thr
+        union_bboxes = union_bboxes[valid_mask]
+        union_score_factor = union_score_factor[valid_mask]  
+
+        rgb_bboxes = rgb_bboxes[valid_mask]
+        tir_bboxes = tir_bboxes[valid_mask]
+        rgb_cls_scores = rgb_cls_scores[valid_mask]
+        tir_cls_scores = tir_cls_scores[valid_mask]
+        rgb_score_factor = rgb_score_factor[valid_mask]
+        tir_score_factor = tir_score_factor[valid_mask]
+        
+        labels = union_bboxes.new_full((len(union_bboxes),), 0, dtype=torch.int64)
+        if union_score_factor.numel() == 0:
+            return rgb_bboxes,\
+                   tir_bboxes,\
+                   rgb_bboxes.new_full((len(rgb_bboxes), ), 0, dtype=torch.int64),\
+                   tir_bboxes.new_full((len(tir_bboxes), ), 0, dtype=torch.int64),\
+                   rgb_bboxes.new_full((len(rgb_bboxes), ), 0, dtype=torch.float32),\
+                   tir_bboxes.new_full((len(tir_bboxes), ), 0, dtype=torch.float32),\
+                   labels,\
+                   labels,\
+                   union_bboxes,\
+                   union_score_factor
+        else:
+            _, keep = batched_nms(union_bboxes, union_score_factor, labels, cfg.nms)
+            union_bboxes = union_bboxes[keep]
+            union_score_factor = union_score_factor[keep]
+            labels = labels[keep]
+            
+            person_ids = torch.arange(len(keep))
+
+            rgb_bboxes = rgb_bboxes[keep]
+            tir_bboxes = tir_bboxes[keep]
+            rgb_scores = rgb_cls_scores[keep] * rgb_score_factor[keep]
+            tir_scores = tir_cls_scores[keep] * tir_score_factor[keep]
+            rgb_mask = rgb_scores > cfg.score_thr
+            tir_mask = tir_scores > cfg.score_thr
+            
+            rgb_bboxes = rgb_bboxes[rgb_mask]
+            tir_bboxes = tir_bboxes[tir_mask]
+            rgb_ids = person_ids[rgb_mask]
+            tir_ids = person_ids[tir_mask]
+            rgb_scores = rgb_scores[rgb_mask]
+            tir_scores = tir_scores[tir_mask]
+            rgb_labels = labels[rgb_mask]
+            tir_labels = labels[tir_mask]
+
+
+        return rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores,\
+                   rgb_labels, tir_labels, union_bboxes, union_score_factor
 
