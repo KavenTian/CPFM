@@ -15,7 +15,7 @@ model = dict(
         deepen_factor=1.0,
         widen_factor=1.0,
         out_indices=(2, 3, 4),
-        stream=3,
+        stream=2,
         plugins=[
             # dict(
             # cfg=dict(type='CoCrossAttention', pos_shape=[512//4, 640//4], pos_dim=128, d_model=128),
@@ -25,33 +25,36 @@ model = dict(
             cfg=dict(type='CoCrossAttention', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
             position='after_stage2'
             ),
-            dict(
-            cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
-            position='after_stage2'
-            ),
+            # dict(
+            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
+            # position='after_stage2'
+            # ),
             dict(
             cfg=dict(type='CoCrossAttention', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
             position='after_stage3'
             ),
-            dict(
-            cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
-            position='after_stage3'
-            ),
+            # dict(
+            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
+            # position='after_stage3'
+            # ),
             dict(
             cfg=dict(type='CoCrossAttention', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
             position='after_stage4'
             ),
-            dict(
-            cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
-            position='after_stage4'
-            )
+            # dict(
+            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
+            # position='after_stage4'
+            # )
         ]
     ),
     
     feature_fusion_module=dict(
         type='ModalFusion',    #特征融合模块
+        # streams=['rgb', 'lwir', 'pub'],
+        streams=['rgb', 'lwir'],
         in_channels=[256, 512, 1024],
         out_channels=[256*2, 512*2, 1024*2],    # double channel
+        use_corrloss=False,
     ),
        
     neck=dict(
@@ -68,7 +71,12 @@ model = dict(
         in_channels=256*2,
         stacked_convs=4,
         feat_channels=256,  # double channel
-        
+        align='star',
+        loss_bbox=dict(
+                     type='DIoULoss',
+                     eps=1e-16,
+                     reduction='sum',
+                     loss_weight=5.0),
     ),
     init_cfg=dict(type='Pretrained', checkpoint='checkpoints/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth'),
     # TODO:训练时和测试的设置，如样本的匹配和nms等
@@ -82,7 +90,7 @@ model = dict(
         nms=dict(type='nms', iou_threshold=0.65),   #nms的配置
     )
 )
-optimizer=dict(type='SGD', lr=0.01, weight_decay=0.0005,momentum=0.9,
+optimizer=dict(type='SGD', lr=0.02, weight_decay=0.0005,momentum=0.9,
                paramwise_cfg=dict(
                    custom_keys={
                        'backbone.CoCrossAttention_plugin_stage1':dict(lr_mult=0.)
@@ -100,16 +108,18 @@ optimizer_config = dict(
 #     by_epoch=False,
 #     warmup_by_epoch=True,
 #     warmup_ratio=1,
-#     warmup_iters=5,  # 5 epoch
-#     num_last_epochs=15,
-#     min_lr_ratio=0.05)
+#     warmup_iters=3,  # 5 epoch
+#     num_last_epochs=1,
+#     min_lr_ratio=0.1)
 lr_config = dict(
     policy='step',
     warmup='linear',
     warmup_by_epoch=True,
     warmup_ratio=0.0001,
     warmup_iters=2,
-    step=13)
+    step=14,
+    # gamma=0.5,
+    )
 
 # TODO:数据集需自定义--定义如何处理标注信息
 dataset_type = 'KaistDataset'   #数据集类型，考虑此处自定义dataloader
@@ -198,7 +208,7 @@ test_pipeline = [
 # TODO:dataloader需自定义
 
 data = dict(
-    samples_per_gpu=2,  #单个gpu的batch size
+    samples_per_gpu=4,  #单个gpu的batch size
     workers_per_gpu=4,  #单个gpu分配的数据加载线程数
     train=train_dataset,
     val = dict(
@@ -221,7 +231,7 @@ data = dict(
 
 runner = dict(
     type='EpochBasedRunner',    #runner的类别
-    max_epochs=15
+    max_epochs=13
 )
 
 # find_unused_parameters=True
@@ -255,7 +265,7 @@ checkpoint_config = dict(
 )
 
 custom_hooks = [
-    dict(type='YOLOXModeSwitchHook', num_last_epochs=2, priority=48),
+    dict(type='YOLOXModeSwitchHook', num_last_epochs=0, priority=48),
     # dict(
     #     type='SyncRandomSizeHook',
     #     ratio_range=(14, 26),
@@ -264,7 +274,7 @@ custom_hooks = [
     #     priority=48),
     dict(
         type='SyncNormHook',
-        num_last_epochs=2,
+        num_last_epochs=0,
         interval=interval,
         priority=48),
     dict(type='ExpMomentumEMAHook', resume_from=resume_from, priority=49)

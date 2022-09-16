@@ -8,6 +8,7 @@ from cvpods.layers.border_align import BorderAlign
 from mmcv.cnn import (ConvModule, DepthwiseSeparableConvModule,
                       bias_init_with_prob)
 from mmcv.ops.nms import batched_nms
+from mmcv.ops import DeformConv2d
 from mmcv.runner import force_fp32
 from mmdet.core import (MlvlPointGenerator, bbox_xyxy_to_cxcywh,
                         build_assigner, build_sampler, multi_apply,
@@ -45,6 +46,7 @@ class MultiSpeHead(YOLOXHead):
                  strides=[8, 16, 32],
                  use_depthwise=False,
                  dcn_on_last_conv=False,
+                 align='star',
                  conv_bias='auto',
                  conv_cfg=None,
                  norm_cfg=dict(type='BN', momentum=0.03, eps=0.001),
@@ -116,9 +118,30 @@ class MultiSpeHead(YOLOXHead):
             self.sampler = build_sampler(sampler_cfg, context=self)
 
         self.fp16_enabled = False
-        self._init_layers()
-        self.feat_align = BorderAlign(pool_size=10)
+        
+        assert align in ['star', 'border']
+        self.align = align
+        if align == 'border':
+            self.feat_align = BorderAlign(pool_size=10)
+            self.multiplier = 5
+        elif align == 'star':
+            self.dcn_kernel, self.dcn_pad, self.dcn_base_offset = self.make_dcn_offset()
+            self.multiplier = 1
+        else:
+            raise Exception("Not supported")
 
+        self._init_layers()
+
+    @staticmethod
+    def make_dcn_offset(num_points=9):
+        dcn_kernel = int(np.sqrt(num_points))
+        dcn_pad = int((dcn_kernel - 1) / 2)
+        dcn_base = np.arange(-dcn_pad, dcn_pad + 1).astype(np.float64)
+        dcn_base_y = np.repeat(dcn_base, dcn_kernel)
+        dcn_base_x = np.tile(dcn_base, dcn_kernel)
+        dcn_base_offset = np.stack([dcn_base_y, dcn_base_x], axis=1).reshape((-1))
+        dcn_base_offset = torch.tensor(dcn_base_offset).view(1, -1, 1, 1)
+        return dcn_kernel, dcn_pad, dcn_base_offset
 
     def _init_layers(self):
         # fusion
@@ -129,6 +152,11 @@ class MultiSpeHead(YOLOXHead):
         self.union_multi_level_reg_convs = nn.ModuleList()
         self.rgb_multi_level_reg_convs = nn.ModuleList()
         self.tir_multi_level_reg_convs = nn.ModuleList()
+
+        # deform_convs
+        if hasattr(self, 'dcn_kernel'):
+            self.rgb_multi_level_reg_dconvs = nn.ModuleList()
+            self.tir_multi_level_reg_dconvs = nn.ModuleList()
         
         # head
         self.union_multi_level_conv_reg = nn.ModuleList()
@@ -149,29 +177,33 @@ class MultiSpeHead(YOLOXHead):
             self.rgb_multi_level_conv_cls = nn.ModuleList()
             self.tir_multi_level_conv_cls = nn.ModuleList()
 
+            if hasattr(self, 'dcn_kernel'):
+                self.rgb_multi_level_cls_dconvs = nn.ModuleList()
+                self.tir_multi_level_cls_dconvs = nn.ModuleList()
+
         for i in range(len(self.strides)):
             self.rgb_unique_fusion_reg.append(
-                self._build_fusion_convs(2**i*256+self.feat_channels, 5 * self.feat_channels, 2))
+                self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
             self.tir_unique_fusion_reg.append(
-                self._build_fusion_convs(2**i*256+self.feat_channels, 5 * self.feat_channels, 2))
+                self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
 
             self.union_multi_level_reg_convs.append(self._build_stacked_convs(self.stacked_convs))
             self.rgb_multi_level_reg_convs.append(
-                self._build_fusion_convs(5 * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
             self.tir_multi_level_reg_convs.append(
-                self._build_fusion_convs(5 * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
             
             if self.use_cls_branch:
                 self.rgb_unique_fusion_cls.append(
-                    self._build_fusion_convs(2**i*256+self.feat_channels, 5 * self.feat_channels, 2))
+                    self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
                 self.tir_unique_fusion_cls.append(
-                    self._build_fusion_convs(2**i*256+self.feat_channels, 5 * self.feat_channels, 2))
+                    self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
 
                 self.union_multi_level_cls_convs.append(self._build_stacked_convs(self.stacked_convs))
                 self.rgb_multi_level_cls_convs.append(
-                    self._build_fusion_convs(5 * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                    self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
                 self.tir_multi_level_cls_convs.append(
-                    self._build_fusion_convs(5 * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                    self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
             
             _, conv_reg, conv_obj = self._build_predictor()
             self.union_multi_level_conv_reg.append(conv_reg)
@@ -188,6 +220,30 @@ class MultiSpeHead(YOLOXHead):
             self.tir_multi_level_conv_obj.append(conv_obj)
             if self.use_cls_branch:
                 self.tir_multi_level_conv_cls.append(conv_cls)
+
+            if hasattr(self, 'dcn_kernel'): # star
+                self.rgb_multi_level_reg_dconvs.append(DeformConv2d(self.feat_channels,
+                                                                    self.feat_channels,
+                                                                    self.dcn_kernel,
+                                                                    1,
+                                                                    padding=self.dcn_pad))
+                self.tir_multi_level_reg_dconvs.append(DeformConv2d(self.feat_channels,
+                                                                    self.feat_channels,
+                                                                    self.dcn_kernel,
+                                                                    1,
+                                                                    padding=self.dcn_pad))
+                if self.use_cls_branch:
+                    self.rgb_multi_level_cls_dconvs.append(DeformConv2d(self.feat_channels,
+                                                                        self.feat_channels,
+                                                                        self.dcn_kernel,
+                                                                        1,
+                                                                        padding=self.dcn_pad))
+                    self.tir_multi_level_cls_dconvs.append(DeformConv2d(self.feat_channels,
+                                                                        self.feat_channels,
+                                                                        self.dcn_kernel,
+                                                                        1,
+                                                                        padding=self.dcn_pad))
+
 
     def _build_fusion_convs(self, in_channels, out_channels, num_stack):
         conv = ConvModule
@@ -297,7 +353,7 @@ class MultiSpeHead(YOLOXHead):
         decoded_bboxes = torch.stack([tl_x, tl_y, br_x, br_y], -1)
         return decoded_bboxes
     
-    def border_align(self, feats, init_bbox, strides):
+    def border_align(self, feats, init_bbox, strides, *kargs):
         # feats.shape: N,5C,H,W
         # init_bbox.shape: N,H,W,4
         # first scale the bbox
@@ -315,9 +371,45 @@ class MultiSpeHead(YOLOXHead):
         align_feats = feats[:,C:,:,:]
         align_feats = self.feat_align(align_feats, bbox)
         align_feats = align_feats.permute(0, 3, 1, 2).reshape(N, -1, H, W)
-        out = torch.cat([align_feats, shot], dim=1)
-        
+        out = torch.cat([align_feats, shot], dim=1)        
         return out
+
+    def star_align(self, feats, init_bbox, strides, dcn_module):
+        # init_bbox(x1, y1, x2, y2).shape: N,H,W,4
+        dcn_base_offset = self.dcn_base_offset.type_as(init_bbox)
+        N, Ch, H, W = feats.shape
+        init_bbox = init_bbox / strides
+        x1 = init_bbox[..., 0] # N, H, W
+        y1 = init_bbox[..., 1]
+        x2 = init_bbox[..., 2]
+        y2 = init_bbox[..., 3]
+
+        xx = 0.5 + torch.arange(W, dtype=init_bbox.dtype, device=init_bbox.device).repeat(N, H, 1)
+        yy = 0.5 + torch.arange(H, dtype=init_bbox.dtype, device=init_bbox.device).repeat(N, W, 1).permute(0, 2, 1)
+
+        dcn_offset = init_bbox.new_zeros(N, 2 * self.dcn_kernel**2, H, W)
+        dcn_offset[:, 0, :, :] = y1 - yy
+        dcn_offset[:, 1, :, :] = x1 - xx
+        dcn_offset[:, 2, :, :] = y1 - yy
+        dcn_offset[:, 3, :, :] = 0.5 * (x1 + x2) - xx
+        dcn_offset[:, 4, :, :] = y1 - yy
+        dcn_offset[:, 5, :, :] = x2 - xx
+        dcn_offset[:, 6, :, :] = 0.5 * (y1 + y2) - yy
+        dcn_offset[:, 7, :, :] = x1 - xx
+        dcn_offset[:, 8, :, :] = 0.5 * (y1 + y2) - yy
+        dcn_offset[:, 9, :, :] = 0.5 * (x1 + x2) - xx
+        dcn_offset[:, 10, :, :] = 0.5 * (y1 + y2) - yy
+        dcn_offset[:, 11, :, :] = x2 - xx
+        dcn_offset[:, 12, :, :] = y2 - yy
+        dcn_offset[:, 13, :, :] = x1 - xx
+        dcn_offset[:, 14, :, :] = y2 - yy
+        dcn_offset[:, 15, :, :] = 0.5 * (x1 + x2) - xx
+        dcn_offset[:, 16, :, :] = y2 - yy
+        dcn_offset[:, 17, :, :] = x2 - xx
+        dcn_offset -= dcn_base_offset
+        
+        outs = nn.ReLU(inplace=True)(dcn_module(feats, dcn_offset))
+        return outs
     
     def get_refined_bbox(self, bbox_init, delta):
         wh_init = bbox_init[...,2:] - bbox_init[...,:2]
@@ -340,13 +432,17 @@ class MultiSpeHead(YOLOXHead):
                         u_conv_obj,
                         rgb_conv_obj,
                         tir_conv_obj,
+                        rgb_reg_dconv=None,
+                        tir_reg_dconv=None,
                         rgb_u_fu_cls=None,
                         tir_u_fu_cls=None,
                         u_cls_convs=None,
                         rgb_cls_convs=None,
                         tir_cls_convs=None,
                         rgb_conv_cls=None,
-                        tir_conv_cls=None):
+                        tir_conv_cls=None,
+                        rgb_cls_dconv=None,
+                        tir_cls_dconv=None):
         rgb_unique, tir_unique = unique_x
         reg_feats = u_reg_convs(x)
         if self.use_cls_branch:
@@ -355,14 +451,20 @@ class MultiSpeHead(YOLOXHead):
         bbox_pred_init = u_conv_reg(reg_feats)  # init_reg head c_x,c_y,w,h
         obj_init = u_conv_obj(reg_feats)        # init_obj head
 
-        rgb_feats_reg = torch.cat((rgb_unique, reg_feats), dim=1)
+        # _rgb_unique = 0.6 * rgb_unique.detach() + 0.4 * rgb_unique
+        # _tir_unique = 0.6 * tir_unique.detach() + 0.4 * tir_unique
+        _reg_feats = 0.9 * reg_feats.detach() + 0.1 * reg_feats
+        if self.use_cls_branch:
+            _cls_feats = 0.9 * cls_feats.detach() + 0.1 * cls_feats
+
+        rgb_feats_reg = torch.cat((rgb_unique, _reg_feats), dim=1)
         rgb_feats_reg = rgb_u_fu_reg(rgb_feats_reg)
-        tir_feats_reg = torch.cat((tir_unique, reg_feats), dim=1)
+        tir_feats_reg = torch.cat((tir_unique, _reg_feats), dim=1)
         tir_feats_reg = tir_u_fu_reg(tir_feats_reg)
         if self.use_cls_branch:
-            rgb_feats_cls = torch.cat((rgb_unique, cls_feats), dim=1)
+            rgb_feats_cls = torch.cat((rgb_unique, _cls_feats), dim=1)
             rgb_feats_cls = rgb_u_fu_cls(rgb_feats_cls)
-            tir_feats_cls = torch.cat((tir_unique, cls_feats), dim=1)
+            tir_feats_cls = torch.cat((tir_unique, _cls_feats), dim=1)
             tir_feats_cls = tir_u_fu_cls(tir_feats_cls)
 
         featmap_sizes = bbox_pred_init.shape[2:]
@@ -373,11 +475,12 @@ class MultiSpeHead(YOLOXHead):
         # get x1y1x2y2 box
         pre_bbox_init = self._bbox_decode(_prior_bbox.permute(1, 2, 0), bbox_pred_off.permute(0, 2, 3, 1))
         
-        rgb_feats_reg = self.border_align(rgb_feats_reg, pre_bbox_init, strides)
-        tir_feats_reg = self.border_align(tir_feats_reg, pre_bbox_init, strides)
+        align_method = getattr(self, f'{self.align}_align')
+        rgb_feats_reg = align_method(rgb_feats_reg, pre_bbox_init, strides, rgb_reg_dconv)
+        tir_feats_reg = align_method(tir_feats_reg, pre_bbox_init, strides, tir_reg_dconv)
         if self.use_cls_branch:
-            rgb_feats_cls = self.border_align(rgb_feats_cls, pre_bbox_init, strides)
-            tir_feats_cls = self.border_align(tir_feats_cls, pre_bbox_init, strides)
+            rgb_feats_cls = align_method(rgb_feats_cls, pre_bbox_init, strides, rgb_cls_dconv)
+            tir_feats_cls = align_method(tir_feats_cls, pre_bbox_init, strides, tir_cls_dconv)
 
         rgb_feats_reg = rgb_reg_convs(rgb_feats_reg)
         tir_feats_reg = tir_reg_convs(tir_feats_reg)
@@ -403,6 +506,7 @@ class MultiSpeHead(YOLOXHead):
                 cls_tir if self.use_cls_branch else None
 
     def forward(self, feats, unique_feats):
+        S = len(self.strides)
         if self.use_cls_branch:
             return multi_apply(self.forward_single, feats, unique_feats,
                             self.strides,
@@ -417,13 +521,17 @@ class MultiSpeHead(YOLOXHead):
                             self.union_multi_level_conv_obj,
                             self.rgb_multi_level_conv_obj,
                             self.tir_multi_level_conv_obj,
+                            self.rgb_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
+                            self.tir_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
                             self.rgb_unique_fusion_cls,
                             self.tir_unique_fusion_cls,
                             self.union_multi_level_cls_convs,
                             self.rgb_multi_level_cls_convs,
                             self.tir_multi_level_cls_convs,
                             self.rgb_multi_level_conv_cls,
-                            self.tir_multi_level_conv_cls)
+                            self.tir_multi_level_conv_cls,
+                            self.rgb_multi_level_cls_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
+                            self.tir_multi_level_cls_dconvs if hasattr(self, 'dcn_kernel') else [None] * S)
         else:
             return multi_apply(self.forward_single, feats, unique_feats,
                             self.strides,
@@ -437,7 +545,9 @@ class MultiSpeHead(YOLOXHead):
                             self.tir_multi_level_conv_reg,
                             self.union_multi_level_conv_obj,
                             self.rgb_multi_level_conv_obj,
-                            self.tir_multi_level_conv_obj)
+                            self.tir_multi_level_conv_obj,
+                            self.rgb_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
+                            self.tir_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S)
 
     
     def forward_train(self, x, img_metas, people_num, **supervision):
@@ -524,7 +634,7 @@ class MultiSpeHead(YOLOXHead):
                         flatten_priors.unsqueeze(0).repeat(N, 1, 1),
                         flatten_union_bboxes.detach(),
                         gt_bboxes_union,
-                        gt_labels_union if self.use_cls_branch else None,
+                        gt_labels_union if self.use_cls_branch else [None, None],
                         flatten_rgb_delta.detach(),
                         flatten_tir_delta.detach(),
                         local_person_ids_rgb,
@@ -535,8 +645,8 @@ class MultiSpeHead(YOLOXHead):
         
         '''get union targets'''
         union_target = []
-        for item_1, item_2 in zip(*_union_target):
-            union_target.append(torch.cat((item_1, item_2), 0))
+        for items in zip(*_union_target):
+            union_target.append(torch.cat(items, 0))
         
         assert len(union_target) == 6        
         union_pos_masks, union_cls_targets, union_obj_targets,\
@@ -553,8 +663,8 @@ class MultiSpeHead(YOLOXHead):
 
         '''get rgb targets'''
         rgb_target = []
-        for item_1, item_2 in zip(*_rgb_target):
-            rgb_target.append(torch.cat((item_1, item_2), 0))
+        for items in zip(*_rgb_target):
+            rgb_target.append(torch.cat(items, 0))
 
         assert len(rgb_target) == 6        
         rgb_pos_masks, rgb_cls_targets, rgb_obj_targets,\
@@ -571,8 +681,8 @@ class MultiSpeHead(YOLOXHead):
 
         '''get tir targets'''
         tir_target = []
-        for item_1, item_2 in zip(*_tir_target):
-            tir_target.append(torch.cat((item_1, item_2), 0))
+        for items in zip(*_tir_target):
+            tir_target.append(torch.cat(items, 0))
 
         assert len(tir_target) == 6        
         tir_pos_masks, tir_cls_targets, tir_obj_targets,\

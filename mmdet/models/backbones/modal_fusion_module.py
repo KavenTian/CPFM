@@ -422,8 +422,8 @@ class ModalFusion(BaseModule):
             self.se = nn.ModuleList()
             for in_channel,out_channel in zip(in_channels, out_channels):    
                 self.se.append(SE_bolock(in_channel=in_channel*len(streams)))
-        self.use_corrloss = use_corrloss
-        if use_corrloss:
+        self.use_corrloss = use_corrloss if self.n_branch == 3 else False
+        if self.use_corrloss:
             self.corrloss = nn.ModuleList()
             for i in range(len(in_channels)):
                 self.corrloss.append(build_loss(
@@ -442,9 +442,8 @@ class ModalFusion(BaseModule):
                 loss_corr = []
         for i in range(self.n_branch):
             if len(self.streams) == 3:
-                if self.use_corrloss:
-                    if self.train():
-                        loss_corr.append(self._corrloss([x_rgb[i], x_pub[i], x_lwir[i]], i))
+                if self.use_corrloss and self.train():
+                    loss_corr.append(self._corrloss([x_rgb[i], x_pub[i], x_lwir[i]], i))
                     
                 x = torch.cat([x_rgb[i], x_lwir[i], x_pub[i]], axis=1)
             elif set(['rgb', 'lwir', 'pub']) - set(self.streams) == set(['pub']):

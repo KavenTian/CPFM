@@ -312,15 +312,15 @@ class CSPDarknetCH_MultiStream(BaseModule):
             self.after_stage4_plugins_names = self.make_block_plugins(self.after_stage4_plugins, '_plugin_stage4')
             self.plugin_names = [self.after_stage1_plugins_names, self.after_stage2_plugins_names, self.after_stage3_plugins_names, self.after_stage4_plugins_names]
 
-            for plgs in self.plugin_names:                
-                if plgs[0] and plgs[1]:
-                    _stage = int(plgs[0][0][-1])
-                    self.add_module('b_norm_rgb'+plgs[0][0][-14:],\
-                                        nn.BatchNorm2d(arch_setting[_stage-1][1], momentum=0.03, eps=0.001))
-                    self.add_module('b_norm_tir'+plgs[1][0][-14:],\
+            for plgs in self.plugin_names:
+                if not plgs or not plgs[0]:
+                    continue             
+                _stage = int(plgs[0][0][-1])
+                self.add_module('b_norm_rgb'+plgs[0][0][-14:],\
+                                    nn.BatchNorm2d(arch_setting[_stage-1][1], momentum=0.03, eps=0.001))
+                self.add_module('b_norm_tir'+plgs[-1][0][-14:],\
                                         nn.BatchNorm2d(arch_setting[_stage-1][1], momentum=0.03, eps=0.001))
 
-    print('a')
 
     def make_block_plugins(self,plugins, postfix):
         """make plugins for block.
@@ -334,7 +334,7 @@ class CSPDarknetCH_MultiStream(BaseModule):
         """
         assert isinstance(plugins, list)
         if not plugins:
-            return  [[],[]]
+            return  [[],[]] if self.stream == 3 else []
         plugin_names = []
         for plugin in plugins:
             plugin = plugin.copy()
@@ -417,7 +417,7 @@ class CSPDarknetCH_MultiStream(BaseModule):
                 else:               
                     if hasattr(self, f'b_norm_rgb_plugin_stage{i+1}'):
                         u_x1, u_x2 = x1, x2
-                        x1, x2 = self.forward_plugin(x1, x2, self.plugin_names[i])
+                        x1, x2 = self.forward_plugin(x1, x2, self.plugin_names[i][0])
                         x1 += u_x1
                         assert int(self.plugin_names[i][0][0][-1]) == i + 1
                         x1 = getattr(self, f'b_norm_rgb_plugin_stage{i+1}')(x1)
