@@ -71,7 +71,10 @@ model = dict(
         in_channels=256*2,
         stacked_convs=4,
         feat_channels=256,  # double channel
-        align='star',
+        align='deform',
+        num_points = 25,
+        offset_group=4,
+        dcn_group=8,
         loss_bbox=dict(
                      type='DIoULoss',
                      eps=1e-16,
@@ -117,7 +120,7 @@ lr_config = dict(
     warmup_by_epoch=True,
     warmup_ratio=0.0001,
     warmup_iters=2,
-    step=14,
+    step=15,
     # gamma=0.5,
     )
 
@@ -231,7 +234,7 @@ data = dict(
 
 runner = dict(
     type='EpochBasedRunner',    #runner的类别
-    max_epochs=13
+    max_epochs=14
 )
 
 # find_unused_parameters=True
@@ -265,7 +268,7 @@ checkpoint_config = dict(
 )
 
 custom_hooks = [
-    dict(type='YOLOXModeSwitchHook', num_last_epochs=0, priority=48),
+    dict(type='YOLOXModeSwitchHook', num_last_epochs=1, priority=48),
     # dict(
     #     type='SyncRandomSizeHook',
     #     ratio_range=(14, 26),
@@ -274,7 +277,7 @@ custom_hooks = [
     #     priority=48),
     dict(
         type='SyncNormHook',
-        num_last_epochs=0,
+        num_last_epochs=1,
         interval=interval,
         priority=48),
     dict(type='ExpMomentumEMAHook', resume_from=resume_from, priority=49)

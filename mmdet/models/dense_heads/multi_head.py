@@ -47,6 +47,9 @@ class MultiSpeHead(YOLOXHead):
                  use_depthwise=False,
                  dcn_on_last_conv=False,
                  align='star',
+                 num_points=9,
+                 offset_group=1,
+                 dcn_group=1,
                  conv_bias='auto',
                  conv_cfg=None,
                  norm_cfg=dict(type='BN', momentum=0.03, eps=0.001),
@@ -119,14 +122,25 @@ class MultiSpeHead(YOLOXHead):
 
         self.fp16_enabled = False
         
-        assert align in ['star', 'border']
+        assert align in ['star', 'border', 'deform']
         self.align = align
         if align == 'border':
             self.feat_align = BorderAlign(pool_size=10)
             self.multiplier = 5
         elif align == 'star':
-            self.dcn_kernel, self.dcn_pad, self.dcn_base_offset = self.make_dcn_offset()
+            self.num_points = 9
+            self.offset_group = 1
+            self.dcn_group = 1
+            self.dcn_kernel, self.dcn_pad, self.dcn_base_offset = self.make_dcn_offset(self.num_points)
+            assert self.dcn_kernel == 3, 'just support 3'
             self.multiplier = 1
+        elif align == 'deform':
+            self.num_points = num_points
+            self.offset_group = offset_group
+            self.dcn_group = dcn_group
+            self.dcn_kernel, self.dcn_pad, self.dcn_base_offset = self.make_dcn_offset(self.num_points)
+            self.multiplier = 1
+            
         else:
             raise Exception("Not supported")
 
@@ -144,6 +158,7 @@ class MultiSpeHead(YOLOXHead):
         return dcn_kernel, dcn_pad, dcn_base_offset
 
     def _init_layers(self):
+        conv = ConvModule
         # fusion
         self.rgb_unique_fusion_reg = nn.ModuleList()
         self.tir_unique_fusion_reg = nn.ModuleList()
@@ -157,6 +172,9 @@ class MultiSpeHead(YOLOXHead):
         if hasattr(self, 'dcn_kernel'):
             self.rgb_multi_level_reg_dconvs = nn.ModuleList()
             self.tir_multi_level_reg_dconvs = nn.ModuleList()
+            if self.align == 'deform':
+                self.rgb_multi_level_reg_offset_convs = nn.ModuleList()
+                self.tir_multi_level_reg_offset_convs = nn.ModuleList()
         
         # head
         self.union_multi_level_conv_reg = nn.ModuleList()
@@ -180,6 +198,9 @@ class MultiSpeHead(YOLOXHead):
             if hasattr(self, 'dcn_kernel'):
                 self.rgb_multi_level_cls_dconvs = nn.ModuleList()
                 self.tir_multi_level_cls_dconvs = nn.ModuleList()
+                if self.align == 'deform':
+                    self.rgb_multi_level_cls_offset_convs = nn.ModuleList()
+                    self.tir_multi_level_cls_offset_convs = nn.ModuleList()
 
         for i in range(len(self.strides)):
             self.rgb_unique_fusion_reg.append(
@@ -189,9 +210,11 @@ class MultiSpeHead(YOLOXHead):
 
             self.union_multi_level_reg_convs.append(self._build_stacked_convs(self.stacked_convs))
             self.rgb_multi_level_reg_convs.append(
-                self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels,
+                                         1 if self.align == 'deform' else self.stacked_convs // 2))
             self.tir_multi_level_reg_convs.append(
-                self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels,
+                                         1 if self.align == 'deform' else self.stacked_convs // 2))
             
             if self.use_cls_branch:
                 self.rgb_unique_fusion_cls.append(
@@ -201,9 +224,11 @@ class MultiSpeHead(YOLOXHead):
 
                 self.union_multi_level_cls_convs.append(self._build_stacked_convs(self.stacked_convs))
                 self.rgb_multi_level_cls_convs.append(
-                    self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                    self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels,
+                                             1 if self.align == 'deform' else self.stacked_convs // 2))
                 self.tir_multi_level_cls_convs.append(
-                    self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels, self.stacked_convs // 2))
+                    self._build_fusion_convs(self.multiplier * self.feat_channels, self.feat_channels,
+                                             1 if self.align == 'deform' else self.stacked_convs // 2))
             
             _, conv_reg, conv_obj = self._build_predictor()
             self.union_multi_level_conv_reg.append(conv_reg)
@@ -221,28 +246,49 @@ class MultiSpeHead(YOLOXHead):
             if self.use_cls_branch:
                 self.tir_multi_level_conv_cls.append(conv_cls)
 
-            if hasattr(self, 'dcn_kernel'): # star
-                self.rgb_multi_level_reg_dconvs.append(DeformConv2d(self.feat_channels,
-                                                                    self.feat_channels,
-                                                                    self.dcn_kernel,
-                                                                    1,
-                                                                    padding=self.dcn_pad))
-                self.tir_multi_level_reg_dconvs.append(DeformConv2d(self.feat_channels,
-                                                                    self.feat_channels,
-                                                                    self.dcn_kernel,
-                                                                    1,
-                                                                    padding=self.dcn_pad))
+            if hasattr(self, 'dcn_kernel'): 
+                self.rgb_multi_level_reg_dconvs.append(
+                    DeformConv2d(self.feat_channels, self.feat_channels, self.dcn_kernel, 1, padding=self.dcn_pad,
+                                 deform_groups=self.offset_group, groups=self.dcn_group))
+                self.tir_multi_level_reg_dconvs.append(
+                    DeformConv2d(self.feat_channels, self.feat_channels, self.dcn_kernel, 1, padding=self.dcn_pad,
+                                 deform_groups=self.offset_group, groups=self.dcn_group))
+                
+                if self.align == 'deform':
+                    self.rgb_multi_level_reg_offset_convs.append(nn.Sequential(
+                        conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                             norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                        conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1, 
+                             act_cfg=dict(type='Sigmoid'), bias=False))
+                        )
+                    self.tir_multi_level_reg_offset_convs.append(nn.Sequential(
+                        conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                             norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                        conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
+                             act_cfg=dict(type='Sigmoid'), bias=False))
+                        )
+
                 if self.use_cls_branch:
-                    self.rgb_multi_level_cls_dconvs.append(DeformConv2d(self.feat_channels,
-                                                                        self.feat_channels,
-                                                                        self.dcn_kernel,
-                                                                        1,
-                                                                        padding=self.dcn_pad))
-                    self.tir_multi_level_cls_dconvs.append(DeformConv2d(self.feat_channels,
-                                                                        self.feat_channels,
-                                                                        self.dcn_kernel,
-                                                                        1,
-                                                                        padding=self.dcn_pad))
+                    self.rgb_multi_level_cls_dconvs.append(
+                        DeformConv2d(self.feat_channels, self.feat_channels, self.dcn_kernel, 1, padding=self.dcn_pad,
+                                     deform_groups=self.offset_group, groups=self.dcn_group))
+                    self.tir_multi_level_cls_dconvs.append(
+                        DeformConv2d(self.feat_channels, self.feat_channels, self.dcn_kernel, 1, padding=self.dcn_pad,
+                                     deform_groups=self.offset_group, groups=self.dcn_group))
+                    
+                    if self.align == 'deform':
+                        self.rgb_multi_level_cls_offset_convs.append(nn.Sequential(
+                            conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                                 norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                            conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
+                                 act_cfg=dict(type='Sigmoid'), bias=False))
+                            )
+                        self.tir_multi_level_cls_offset_convs.append(nn.Sequential(
+                            conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                                 norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                            conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
+                                 act_cfg=dict(type='Sigmoid'), bias=False))
+                            )
 
 
     def _build_fusion_convs(self, in_channels, out_channels, num_stack):
@@ -374,7 +420,7 @@ class MultiSpeHead(YOLOXHead):
         out = torch.cat([align_feats, shot], dim=1)        
         return out
 
-    def star_align(self, feats, init_bbox, strides, dcn_module):
+    def star_align(self, feats, init_bbox, strides, dcn_module, *kargs):
         # init_bbox(x1, y1, x2, y2).shape: N,H,W,4
         dcn_base_offset = self.dcn_base_offset.type_as(init_bbox)
         N, Ch, H, W = feats.shape
@@ -410,6 +456,37 @@ class MultiSpeHead(YOLOXHead):
         
         outs = nn.ReLU(inplace=True)(dcn_module(feats, dcn_offset))
         return outs
+
+    def deform_align(self, feats, init_bbox, strides, dcn_module, dcn_offset_conv):
+        # init_bbox(x1, y1, x2, y2).shape: N,H,W,4
+        dcn_base_offset = self.dcn_base_offset.type_as(init_bbox)
+        N, Ch, H, W = feats.shape
+        init_bbox = init_bbox / strides
+        x1 = init_bbox[..., 0] # N, H, W
+        y1 = init_bbox[..., 1]
+        x2 = init_bbox[..., 2]
+        y2 = init_bbox[..., 3]
+        h = y2 - y1 # N, H, W
+        w = x2 - x1
+
+        xx = 0.5 + torch.arange(W, dtype=init_bbox.dtype, device=init_bbox.device).repeat(N, H, 1)
+        yy = 0.5 + torch.arange(H, dtype=init_bbox.dtype, device=init_bbox.device).repeat(N, W, 1).permute(0, 2, 1)
+
+        offset_pred = dcn_offset_conv(feats) # N, d_gps*k*k*2, H, W
+        
+        # decode position in bboxes
+        dcn_offset = torch.zeros_like(offset_pred)
+        dcn_offset[:, ::2, :, :] = offset_pred[:, ::2, :, :] * h.unsqueeze(1) # N ,1, H, W
+        dcn_offset[:, 1::2, :, :] = offset_pred[:, 1::2, :, :] * w.unsqueeze(1)
+        # get bboxes offset then accumulate
+        dy = y1 - yy
+        dcn_offset[:, ::2, :, :] = dcn_offset[:, ::2, :, :] + dy.unsqueeze(1)
+        dx = x1 - xx
+        dcn_offset[:, 1::2, :, :] = dcn_offset[:, 1::2, :, :] + dx.unsqueeze(1)
+
+        dcn_offset -= dcn_base_offset.repeat(1, self.offset_group, 1, 1)
+        outs = nn.ReLU(inplace=True)(dcn_module(feats, dcn_offset))
+        return outs
     
     def get_refined_bbox(self, bbox_init, delta):
         wh_init = bbox_init[...,2:] - bbox_init[...,:2]
@@ -434,6 +511,8 @@ class MultiSpeHead(YOLOXHead):
                         tir_conv_obj,
                         rgb_reg_dconv=None,
                         tir_reg_dconv=None,
+                        rgb_reg_offset_convs=None,
+                        tir_reg_offset_convs=None,
                         rgb_u_fu_cls=None,
                         tir_u_fu_cls=None,
                         u_cls_convs=None,
@@ -442,7 +521,9 @@ class MultiSpeHead(YOLOXHead):
                         rgb_conv_cls=None,
                         tir_conv_cls=None,
                         rgb_cls_dconv=None,
-                        tir_cls_dconv=None):
+                        tir_cls_dconv=None,
+                        rgb_cls_offset_convs=None,
+                        tir_cls_offset_convs=None):
         rgb_unique, tir_unique = unique_x
         reg_feats = u_reg_convs(x)
         if self.use_cls_branch:
@@ -476,11 +557,11 @@ class MultiSpeHead(YOLOXHead):
         pre_bbox_init = self._bbox_decode(_prior_bbox.permute(1, 2, 0), bbox_pred_off.permute(0, 2, 3, 1))
         
         align_method = getattr(self, f'{self.align}_align')
-        rgb_feats_reg = align_method(rgb_feats_reg, pre_bbox_init, strides, rgb_reg_dconv)
-        tir_feats_reg = align_method(tir_feats_reg, pre_bbox_init, strides, tir_reg_dconv)
+        rgb_feats_reg = align_method(rgb_feats_reg, pre_bbox_init, strides, rgb_reg_dconv, rgb_reg_offset_convs)
+        tir_feats_reg = align_method(tir_feats_reg, pre_bbox_init, strides, tir_reg_dconv, tir_reg_offset_convs)
         if self.use_cls_branch:
-            rgb_feats_cls = align_method(rgb_feats_cls, pre_bbox_init, strides, rgb_cls_dconv)
-            tir_feats_cls = align_method(tir_feats_cls, pre_bbox_init, strides, tir_cls_dconv)
+            rgb_feats_cls = align_method(rgb_feats_cls, pre_bbox_init, strides, rgb_cls_dconv, rgb_cls_offset_convs)
+            tir_feats_cls = align_method(tir_feats_cls, pre_bbox_init, strides, tir_cls_dconv, tir_cls_offset_convs)
 
         rgb_feats_reg = rgb_reg_convs(rgb_feats_reg)
         tir_feats_reg = tir_reg_convs(tir_feats_reg)
@@ -523,6 +604,8 @@ class MultiSpeHead(YOLOXHead):
                             self.tir_multi_level_conv_obj,
                             self.rgb_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
                             self.tir_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
+                            self.rgb_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
+                            self.tir_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
                             self.rgb_unique_fusion_cls,
                             self.tir_unique_fusion_cls,
                             self.union_multi_level_cls_convs,
@@ -531,7 +614,10 @@ class MultiSpeHead(YOLOXHead):
                             self.rgb_multi_level_conv_cls,
                             self.tir_multi_level_conv_cls,
                             self.rgb_multi_level_cls_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
-                            self.tir_multi_level_cls_dconvs if hasattr(self, 'dcn_kernel') else [None] * S)
+                            self.tir_multi_level_cls_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
+                            self.rgb_multi_level_cls_offset_convs if self.align == 'deform' else [None] * S,
+                            self.tir_multi_level_cls_offset_convs if self.align == 'deform' else [None] * S
+                            )
         else:
             return multi_apply(self.forward_single, feats, unique_feats,
                             self.strides,
@@ -547,7 +633,9 @@ class MultiSpeHead(YOLOXHead):
                             self.rgb_multi_level_conv_obj,
                             self.tir_multi_level_conv_obj,
                             self.rgb_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
-                            self.tir_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S)
+                            self.tir_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
+                            self.rgb_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
+                            self.tir_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S)
 
     
     def forward_train(self, x, img_metas, people_num, **supervision):
