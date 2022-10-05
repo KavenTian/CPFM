@@ -60,7 +60,8 @@ class RGBT_Det_MultiStream(SingleStageDetector):
                     continue
                 replace_str = re.compile('_s\d{1,}')
                 origin_name = replace_str.sub('', name)
-                state_dict[name] = original_model[origin_name]
+                if state_dict[name].shape == original_model[origin_name].shape:
+                    state_dict[name] = original_model[origin_name]
       
         self.load_state_dict(state_dict)
         print('init weight done')

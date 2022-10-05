@@ -1,3 +1,4 @@
+import inspect
 import math, torch
 import numpy as np
 import torch.nn as nn
@@ -120,6 +121,7 @@ class MultiSpeHead(YOLOXHead):
             sampler_cfg = dict(type='PseudoSampler')
             self.sampler = build_sampler(sampler_cfg, context=self)
 
+        self.debug = False
         self.fp16_enabled = False
         
         assert align in ['star', 'border', 'deform']
@@ -173,8 +175,20 @@ class MultiSpeHead(YOLOXHead):
             self.rgb_multi_level_reg_dconvs = nn.ModuleList()
             self.tir_multi_level_reg_dconvs = nn.ModuleList()
             if self.align == 'deform':
-                self.rgb_multi_level_reg_offset_convs = nn.ModuleList()
-                self.tir_multi_level_reg_offset_convs = nn.ModuleList()
+                # self.rgb_multi_level_reg_offset_convs = nn.ModuleList()
+                # self.tir_multi_level_reg_offset_convs = nn.ModuleList()
+                self.add_module('shared_rgb_reg_offset_convs',
+                    nn.Sequential(
+                        conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                             norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                        conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1, 
+                             act_cfg=dict(type='Sigmoid'), bias=False)))
+                self.add_module('shared_tir_reg_offset_convs',
+                    nn.Sequential(
+                        conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                             norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                        conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1, 
+                             act_cfg=dict(type='Sigmoid'), bias=False)))
         
         # head
         self.union_multi_level_conv_reg = nn.ModuleList()
@@ -199,8 +213,20 @@ class MultiSpeHead(YOLOXHead):
                 self.rgb_multi_level_cls_dconvs = nn.ModuleList()
                 self.tir_multi_level_cls_dconvs = nn.ModuleList()
                 if self.align == 'deform':
-                    self.rgb_multi_level_cls_offset_convs = nn.ModuleList()
-                    self.tir_multi_level_cls_offset_convs = nn.ModuleList()
+                    # self.rgb_multi_level_cls_offset_convs = nn.ModuleList()
+                    # self.tir_multi_level_cls_offset_convs = nn.ModuleList()
+                    self.add_module('shared_rgb_cls_offset_convs',
+                        nn.Sequential(
+                            conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                                norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                            conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1, 
+                                act_cfg=dict(type='Sigmoid'), bias=False)))
+                    self.add_module('shared_tir_cls_offset_convs',
+                        nn.Sequential(
+                            conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                                norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                            conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1, 
+                                act_cfg=dict(type='Sigmoid'), bias=False)))
 
         for i in range(len(self.strides)):
             self.rgb_unique_fusion_reg.append(
@@ -254,19 +280,19 @@ class MultiSpeHead(YOLOXHead):
                     DeformConv2d(self.feat_channels, self.feat_channels, self.dcn_kernel, 1, padding=self.dcn_pad,
                                  deform_groups=self.offset_group, groups=self.dcn_group))
                 
-                if self.align == 'deform':
-                    self.rgb_multi_level_reg_offset_convs.append(nn.Sequential(
-                        conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
-                             norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
-                        conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1, 
-                             act_cfg=dict(type='Sigmoid'), bias=False))
-                        )
-                    self.tir_multi_level_reg_offset_convs.append(nn.Sequential(
-                        conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
-                             norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
-                        conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
-                             act_cfg=dict(type='Sigmoid'), bias=False))
-                        )
+                # if self.align == 'deform':
+                #     self.rgb_multi_level_reg_offset_convs.append(nn.Sequential(
+                #         conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                #              norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                #         conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1, 
+                #              act_cfg=dict(type='Sigmoid'), bias=False))
+                #         )
+                #     self.tir_multi_level_reg_offset_convs.append(nn.Sequential(
+                #         conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                #              norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                #         conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
+                #              act_cfg=dict(type='Sigmoid'), bias=False))
+                #         )
 
                 if self.use_cls_branch:
                     self.rgb_multi_level_cls_dconvs.append(
@@ -276,19 +302,19 @@ class MultiSpeHead(YOLOXHead):
                         DeformConv2d(self.feat_channels, self.feat_channels, self.dcn_kernel, 1, padding=self.dcn_pad,
                                      deform_groups=self.offset_group, groups=self.dcn_group))
                     
-                    if self.align == 'deform':
-                        self.rgb_multi_level_cls_offset_convs.append(nn.Sequential(
-                            conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
-                                 norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
-                            conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
-                                 act_cfg=dict(type='Sigmoid'), bias=False))
-                            )
-                        self.tir_multi_level_cls_offset_convs.append(nn.Sequential(
-                            conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
-                                 norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
-                            conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
-                                 act_cfg=dict(type='Sigmoid'), bias=False))
-                            )
+                    # if self.align == 'deform':
+                    #     self.rgb_multi_level_cls_offset_convs.append(nn.Sequential(
+                    #         conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                    #              norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                    #         conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
+                    #              act_cfg=dict(type='Sigmoid'), bias=False))
+                    #         )
+                    #     self.tir_multi_level_cls_offset_convs.append(nn.Sequential(
+                    #         conv(self.feat_channels, self.feat_channels, 3, padding=1, conv_cfg=self.conv_cfg,
+                    #              norm_cfg=self.norm_cfg, act_cfg=self.act_cfg, bias=self.conv_bias),
+                    #         conv(self.feat_channels, self.offset_group * self.dcn_kernel**2 * 2, 3, padding=1,
+                    #              act_cfg=dict(type='Sigmoid'), bias=False))
+                    #         )
 
 
     def _build_fusion_convs(self, in_channels, out_channels, num_stack):
@@ -604,8 +630,11 @@ class MultiSpeHead(YOLOXHead):
                             self.tir_multi_level_conv_obj,
                             self.rgb_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
                             self.tir_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
-                            self.rgb_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
-                            self.tir_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
+                            # self.rgb_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
+                            # self.tir_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
+                            [self.shared_rgb_reg_offset_convs] * S if self.align == 'deform' else [None] * S,
+                            [self.shared_tir_reg_offset_convs] * S if self.align == 'deform' else [None] * S,
+                            # [self.shared_rgb_reg_offset_convs] * S if self.align == 'deform' else [None] * S,
                             self.rgb_unique_fusion_cls,
                             self.tir_unique_fusion_cls,
                             self.union_multi_level_cls_convs,
@@ -615,8 +644,11 @@ class MultiSpeHead(YOLOXHead):
                             self.tir_multi_level_conv_cls,
                             self.rgb_multi_level_cls_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
                             self.tir_multi_level_cls_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
-                            self.rgb_multi_level_cls_offset_convs if self.align == 'deform' else [None] * S,
-                            self.tir_multi_level_cls_offset_convs if self.align == 'deform' else [None] * S
+                            # self.rgb_multi_level_cls_offset_convs if self.align == 'deform' else [None] * S,
+                            # self.tir_multi_level_cls_offset_convs if self.align == 'deform' else [None] * S,
+                            [self.shared_rgb_cls_offset_convs] * S if self.align == 'deform' else [None] * S,
+                            [self.shared_tir_cls_offset_convs] * S if self.align == 'deform' else [None] * S,
+                            # [self.shared_rgb_cls_offset_convs] * S if self.align == 'deform' else [None] * S
                             )
         else:
             return multi_apply(self.forward_single, feats, unique_feats,
@@ -634,8 +666,11 @@ class MultiSpeHead(YOLOXHead):
                             self.tir_multi_level_conv_obj,
                             self.rgb_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
                             self.tir_multi_level_reg_dconvs if hasattr(self, 'dcn_kernel') else [None] * S,
-                            self.rgb_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
-                            self.tir_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S)
+                            # self.rgb_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S,
+                            # self.tir_multi_level_reg_offset_convs if self.align == 'deform' else [None] * S
+                            [self.shared_rgb_reg_offset_convs] * S if self.align == 'deform' else [None] * S,
+                            [self.shared_tir_reg_offset_convs] * S if self.align == 'deform' else [None] * S)
+                            # [self.shared_rgb_reg_offset_convs] * S if self.align == 'deform' else [None] * S)
 
     
     def forward_train(self, x, img_metas, people_num, **supervision):
@@ -1112,7 +1147,8 @@ class MultiSpeHead(YOLOXHead):
                         rgb_score_factor,
                         tir_score_factor,
                         union_score_factor,
-                        cfg):
+                        cfg,
+                        scr_mul=6):
         score_factor = torch.stack([rgb_score_factor, tir_score_factor], dim=-1)
         cls_scores = torch.stack([rgb_cls_scores, tir_cls_scores], dim=-1)
         
@@ -1130,8 +1166,20 @@ class MultiSpeHead(YOLOXHead):
         modal_scores = score_factor[valid_mask] * cls_scores[valid_mask]
         anchor_scores = max_obj[valid_mask] * max_obj_cls[valid_mask]
         
-        bbox_weight = score_factor[valid_mask]
-        weight_mask = bbox_weight < cfg.score_thr
+        # # bbox_weight = score_factor[valid_mask]
+        bbox_weight = modal_scores
+        weight_mask = bbox_weight < cfg.score_thr     
+        
+        min_scr, min_idx = modal_scores.min(dim=1)
+        max_scr, _ = modal_scores.max(dim=1)
+        scr_mask = max_scr > scr_mul * min_scr
+        second_scr_mask = min_scr < 10 * cfg.score_thr
+        scr_mask = scr_mask & second_scr_mask
+        _min_idx = min_idx[scr_mask].unsqueeze(-1)
+        min_mask = scr_mask.new_full((len(_min_idx), 2), 0, dtype=torch.bool)
+        min_mask.scatter_(1, _min_idx, torch.ones_like(_min_idx, dtype=torch.bool))
+        weight_mask[scr_mask, :] = weight_mask[scr_mask, :] | min_mask
+        
         bbox_weight[weight_mask] = 0
         bbox_weight = bbox_weight / bbox_weight.sum(1).unsqueeze(-1)
         assert len(rgb_bboxes) == len(tir_bboxes) == len(bbox_weight)
@@ -1176,6 +1224,18 @@ class MultiSpeHead(YOLOXHead):
             tir_labels = labels[tir_mask]
             assert len(rgb_labels) == len(rgb_bboxes) == len(rgb_scores) == len(rgb_ids)
             assert len(tir_labels) == len(tir_bboxes) == len(tir_scores) == len(tir_ids)           
+            
+            if self.debug:
+                now_func = inspect.stack()[0][3]
+                if now_func in self.debug:
+                    for var in self.debug[now_func]:
+                        try:
+                            val=eval(var)
+                        except NameError as e:
+                            print(e)
+                        else:
+                            self.debug[now_func][var] = val
+            
             return rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores,\
                    rgb_labels, tir_labels, union_bboxes, anchor_scores
 
@@ -1246,3 +1306,19 @@ class MultiSpeHead(YOLOXHead):
         return rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores,\
                    rgb_labels, tir_labels, union_bboxes, union_score_factor
 
+    def set_debug(self, func_names:list, var_names:list):
+        func_names = [func_names] if isinstance(func_names, str) else func_names
+        var_names = [var_names] if isinstance(var_names, str) else var_names
+        assert len(func_names) == len(var_names)
+        for func, vars in zip(func_names, var_names):
+            if hasattr(self, func):
+                for var in vars:
+                    if not self.debug:
+                        self.debug = {func:{var:[]}}
+                    elif func not in self.debug:
+                        self.debug[func] = {var:[]}
+                    else:
+                        self.debug[func][var] = []
+            else:
+                print(f'Has no func {func}')     
+        return

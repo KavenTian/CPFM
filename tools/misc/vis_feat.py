@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
 from argparse import ArgumentParser
+import cv2
 
 from mmdet.apis import (async_inference_detector, inference, inference_rgbt_detector,
                         init_detector, show_result_pyplot, show_rgbt_result_pyplot)
@@ -24,12 +25,12 @@ def forward_inf_hook(module, data_input, data_output):
 def backward_inf_hook(module, grad_in, grad_out):
     grad_inf.append(grad_out[0].detach())
 
-def forward_pub_hook(module, data_input, data_output):
-    fmap_pub.append(data_output)
-    input_pub.append(data_input)
+# def forward_pub_hook(module, data_input, data_output):
+#     fmap_pub.append(data_output)
+#     input_pub.append(data_input)
 
-def backward_pub_hook(module, grad_in, grad_out):
-    grad_pub.append(grad_out[0].detach())
+# def backward_pub_hook(module, grad_in, grad_out):
+#     grad_pub.append(grad_out[0].detach())
 
 def show_fmap(fmap, img, save_name):
     img = mmcv.imread(img)
@@ -45,6 +46,76 @@ def show_fmap(fmap, img, save_name):
     
     plt.savefig(save_name)
     plt.close()
+
+def decode_offset(model, fmap:dict, pred_res:tuple, img_rgb:str, img_tir:str):
+    union_bboxes = pred_res[-2][0]
+    rgb_bboxes = pred_res[0][0]
+    tir_bboxes = pred_res[1][0]
+
+    debug_dict = model.bbox_head.debug
+    valid_mask = debug_dict['pair_bboxes_nms']['valid_mask']
+    keep = debug_dict['pair_bboxes_nms']['keep']
+    rgb_offset = list(map(lambda x:x.permute(0,2,3,1).reshape(-1, x.shape[1]), fmap['vis']))
+    tir_offset = list(map(lambda x:x.permute(0,2,3,1).reshape(-1, x.shape[1]), fmap['inf']))
+    rgb_offset = torch.cat(rgb_offset, dim=0)
+    tir_offset = torch.cat(tir_offset, dim=0)
+    assert len(valid_mask) == len(rgb_offset) == len(tir_offset)
+    assert len(keep) == len(union_bboxes)
+    
+    rgb_offset = rgb_offset[valid_mask][keep]
+    tir_offset = tir_offset[valid_mask][keep]
+
+    rgb_x = rgb_offset[:, 1::2]
+    rgb_y = rgb_offset[:, ::2]
+    tir_x = tir_offset[:, 1::2]
+    tir_y = tir_offset[:, ::2]
+
+    w = union_bboxes[:, 2:3] - union_bboxes[:, 0:1]
+    h = union_bboxes[:, 3:] - union_bboxes[:, 1:2]
+
+    rgb_x = rgb_x.cpu().numpy() * w + union_bboxes[:, 0:1]
+    rgb_y = rgb_y.cpu().numpy() * h + union_bboxes[:, 1:2]
+    tir_x = tir_x.cpu().numpy() * w + union_bboxes[:, 0:1]
+    tir_y = tir_y.cpu().numpy() * h + union_bboxes[:, 1:2]
+
+    img_rgb = mmcv.imread(img_rgb)
+    img_tir = mmcv.imread(img_tir)
+    width, height, _ = img_rgb.shape
+
+    # for x, y in zip(rgb_x.reshape(-1), rgb_y.reshape(-1)):
+    #     cv2.drawMarker(img_rgb, (round(x), round(y)), (0,0,255), markerType=0, markerSize=1)
+    # for x, y in zip(tir_x.reshape(-1), tir_y.reshape(-1)):
+    #     cv2.drawMarker(img_rgb, (round(x), round(y)), (0,255,0), markerType=0, markerSize=1)
+    for bb in union_bboxes.tolist():
+        bb = list(map(round, bb))
+        cv2.rectangle(img_rgb, tuple(bb[:2]), tuple(bb[2:]), (255,0,0), 1)
+    for bb in rgb_bboxes.tolist():
+        bb = list(map(round, bb))
+        cv2.rectangle(img_rgb, tuple(bb[:2]), tuple(bb[2:]), (0,0,255), 1)
+    for bb in tir_bboxes.tolist():
+        bb = list(map(round, bb))
+        cv2.rectangle(img_rgb, tuple(bb[:2]), tuple(bb[2:]), (0,255,0), 1)
+    cv2.imwrite('work_dirs/yolox_kaist_3stream_2nc_coattention/rgb_unpair_m.jpg', img_rgb)
+
+
+    # for x, y in zip(rgb_x.reshape(-1), rgb_y.reshape(-1)):
+    #     cv2.drawMarker(img_tir, (round(x), round(y)), (0,0,255), markerType=0, markerSize=1)
+    # for x, y in zip(tir_x.reshape(-1), tir_y.reshape(-1)):
+    #     cv2.drawMarker(img_tir, (round(x), round(y)), (0,255,0), markerType=0, markerSize=1)
+    for bb in union_bboxes.tolist():
+        bb = list(map(round, bb))
+        cv2.rectangle(img_tir, tuple(bb[:2]), tuple(bb[2:]), (255,0,0), 1)
+    for bb in rgb_bboxes.tolist():
+        bb = list(map(round, bb))
+        cv2.rectangle(img_tir, tuple(bb[:2]), tuple(bb[2:]), (0,0,255), 1)
+    for bb in tir_bboxes.tolist():
+        bb = list(map(round, bb))
+        cv2.rectangle(img_tir, tuple(bb[:2]), tuple(bb[2:]), (0,255,0), 1)   
+    cv2.imwrite('work_dirs/yolox_kaist_3stream_2nc_coattention/tir_unpair_m.jpg', img_tir)
+
+
+
+    return
 
 
 def parse_args():
@@ -77,14 +148,18 @@ def main(args, fmap_block, input_block, grads):
     
     # model.backbone.stage4_s3.register_forward_hook(forward_pub_hook)
     # model.backbone.stage4_s3.register_backward_hook(backward_pub_hook)
-    model.bbox_head.feat_align.register_forward_hook(forward_pub_hook)
+    model.bbox_head.shared_rgb_reg_offset_convs.register_forward_hook(forward_vis_hook)
+    model.bbox_head.shared_tir_reg_offset_convs.register_forward_hook(forward_inf_hook)
+    model.bbox_head.set_debug('pair_bboxes_nms',[['valid_mask', 'keep']])
 
-    # model.bbox_head.union_multi_level_reg_convs[0].register_backward_hook(backward_pub_hook)
     
     if args.img_vis.endswith(('.jpg', '.png')) and args.img_inf.endswith(('.jpg', '.png')):
         # test a single image
         imgs = [args.img_vis, args.img_inf]
         result = inference_rgbt_detector(model, imgs)
+
+        decode_offset(model, fmap_block, result, args.img_vis, args.img_inf)
+
         def f(x, i):
             return x.permute(0, 3, 1, 2).reshape(1, -1, 64//(2**i), 80//(2**i))
         reg_rgb = [f(fmap_block['pub'][i*4], i) for i in range(3)]

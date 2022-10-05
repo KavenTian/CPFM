@@ -20,6 +20,7 @@ from .trident_resnet import TridentResNet
 from .modal_fusion_module import ModalFusion, ModalFusionWithTransformer
 from .illumination_aware_module import Illum_Aware_Module
 from .csp_darknet_ch_multistream import CSPDarknetCH_MultiStream
+from .vgg_multistream import VGG_Mul
 
 __all__ = [
     'RegNet', 'ResNet', 'ResNetV1d', 'ResNeXt', 'SSDVGG', 'HRNet',
@@ -27,5 +28,5 @@ __all__ = [
     'DetectoRS_ResNeXt', 'Darknet', 'ResNeSt', 'TridentResNet', 'CSPDarknet',
     'SwinTransformer', 'PyramidVisionTransformer',
     'PyramidVisionTransformerV2', 'EfficientNet', 'CSPDarknetCH', 'ModalFusion', 'ModalFusionWithTransformer', 'Illum_Aware_Module',
-    'CSPDarknetCH_MultiStream',
+    'CSPDarknetCH_MultiStream', 'VGG_Mul'
 ]

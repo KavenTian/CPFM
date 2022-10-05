@@ -8,45 +8,60 @@ _base_ = [
 
 model = dict(
     type='RGBT_Det_MultiStream', #检测器名称
+    # backbone=dict(
+    #     type='CSPDarknetCH_MultiStream',  
+    #     in_channels=6,
+    #     arch='P5',
+    #     deepen_factor=1.0,
+    #     widen_factor=1.0,
+    #     out_indices=(2, 3, 4),
+    #     stream=2,
+    #     plugins=[
+    #         # dict(
+    #         # cfg=dict(type='CoCrossAttention', pos_shape=[512//4, 640//4], pos_dim=128, d_model=128),
+    #         # position='after_stage1'
+    #         # ),
+    #         dict(
+    #         cfg=dict(type='CoCrossAttention', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
+    #         position='after_stage2'
+    #         ),
+    #         # dict(
+    #         # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
+    #         # position='after_stage2'
+    #         # ),
+    #         dict(
+    #         cfg=dict(type='CoCrossAttention', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
+    #         position='after_stage3'
+    #         ),
+    #         # dict(
+    #         # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
+    #         # position='after_stage3'
+    #         # ),
+    #         dict(
+    #         cfg=dict(type='CoCrossAttention', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
+    #         position='after_stage4'
+    #         ),
+    #         # dict(
+    #         # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
+    #         # position='after_stage4'
+    #         # )
+    #     ]
+    # ),
     backbone=dict(
-        type='CSPDarknetCH_MultiStream',  
-        in_channels=6,
-        arch='P5',
-        deepen_factor=1.0,
-        widen_factor=1.0,
+        type='VGG_Mul',
+        depth=16,
+        with_last_pool=True,
+        ceil_mode=True,
         out_indices=(2, 3, 4),
-        stream=2,
         plugins=[
-            # dict(
-            # cfg=dict(type='CoCrossAttention', pos_shape=[512//4, 640//4], pos_dim=128, d_model=128),
-            # position='after_stage1'
-            # ),
-            dict(
-            cfg=dict(type='CoCrossAttention', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
-            position='after_stage2'
-            ),
-            # dict(
-            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
-            # position='after_stage2'
-            # ),
-            dict(
-            cfg=dict(type='CoCrossAttention', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
-            position='after_stage3'
-            ),
-            # dict(
-            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
-            # position='after_stage3'
-            # ),
-            dict(
-            cfg=dict(type='CoCrossAttention', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
-            position='after_stage4'
-            ),
-            # dict(
-            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
-            # position='after_stage4'
-            # )
+            dict(cfg=dict(type='CoCrossAttention', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
+                 position='after_stage2'),
+            dict(cfg=dict(type='CoCrossAttention', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
+                 position='after_stage3'),
+            dict(cfg=dict(type='CoCrossAttention', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
+                 position='after_stage4'),
         ]
-    ),
+            ),
     
     feature_fusion_module=dict(
         type='ModalFusion',    #特征融合模块
@@ -81,7 +96,10 @@ model = dict(
                      reduction='sum',
                      loss_weight=5.0),
     ),
-    init_cfg=dict(type='Pretrained', checkpoint='checkpoints/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth'),
+    init_cfg=dict(type='Pretrained', 
+                #   checkpoint='checkpoints/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth'
+                  checkpoint='checkpoints/ssd512_coco_20210803_022849-0a47a1ca.pth'
+                ),
     # TODO:训练时和测试的设置，如样本的匹配和nms等
     train_cfg=dict(
         assigner=dict(type='SimOTAAssigner', center_radius=2.5), #正负样本的匹配机制，见mmdet/core/bbox/assigners/
