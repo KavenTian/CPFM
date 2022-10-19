@@ -1,0 +1,2 @@
+% bbGt version=3
+people 591 211 41 71 0 0 0 0 0 0 0 0

@@ -44,6 +44,7 @@ class MultiSpeHead(YOLOXHead):
                  in_channels,
                  feat_channels=256,
                  stacked_convs=2,
+                 has_unique=True,
                  strides=[8, 16, 32],
                  use_depthwise=False,
                  dcn_on_last_conv=False,
@@ -89,6 +90,7 @@ class MultiSpeHead(YOLOXHead):
         self.in_channels = in_channels
         self.feat_channels = feat_channels
         self.stacked_convs = stacked_convs
+        self.has_unique = has_unique
         self.strides = strides
         self.use_depthwise = use_depthwise
         self.dcn_on_last_conv = dcn_on_last_conv
@@ -229,10 +231,11 @@ class MultiSpeHead(YOLOXHead):
                                 act_cfg=dict(type='Sigmoid'), bias=False)))
 
         for i in range(len(self.strides)):
+            unique_channels = 2**i*256 if self.has_unique else 0
             self.rgb_unique_fusion_reg.append(
-                self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
+                self._build_fusion_convs(unique_channels+self.feat_channels, self.multiplier * self.feat_channels, 2))
             self.tir_unique_fusion_reg.append(
-                self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
+                self._build_fusion_convs(unique_channels+self.feat_channels, self.multiplier * self.feat_channels, 2))
 
             self.union_multi_level_reg_convs.append(self._build_stacked_convs(self.stacked_convs))
             self.rgb_multi_level_reg_convs.append(
@@ -244,9 +247,9 @@ class MultiSpeHead(YOLOXHead):
             
             if self.use_cls_branch:
                 self.rgb_unique_fusion_cls.append(
-                    self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
+                    self._build_fusion_convs(unique_channels+self.feat_channels, self.multiplier * self.feat_channels, 2))
                 self.tir_unique_fusion_cls.append(
-                    self._build_fusion_convs(2**i*256+self.feat_channels, self.multiplier * self.feat_channels, 2))
+                    self._build_fusion_convs(unique_channels+self.feat_channels, self.multiplier * self.feat_channels, 2))
 
                 self.union_multi_level_cls_convs.append(self._build_stacked_convs(self.stacked_convs))
                 self.rgb_multi_level_cls_convs.append(
@@ -564,14 +567,14 @@ class MultiSpeHead(YOLOXHead):
         if self.use_cls_branch:
             _cls_feats = 0.9 * cls_feats.detach() + 0.1 * cls_feats
 
-        rgb_feats_reg = torch.cat((rgb_unique, _reg_feats), dim=1)
+        rgb_feats_reg = torch.cat((rgb_unique, _reg_feats), dim=1) if self.has_unique else _reg_feats
         rgb_feats_reg = rgb_u_fu_reg(rgb_feats_reg)
-        tir_feats_reg = torch.cat((tir_unique, _reg_feats), dim=1)
+        tir_feats_reg = torch.cat((tir_unique, _reg_feats), dim=1) if self.has_unique else _reg_feats
         tir_feats_reg = tir_u_fu_reg(tir_feats_reg)
         if self.use_cls_branch:
-            rgb_feats_cls = torch.cat((rgb_unique, _cls_feats), dim=1)
+            rgb_feats_cls = torch.cat((rgb_unique, _cls_feats), dim=1) if self.has_unique else _cls_feats
             rgb_feats_cls = rgb_u_fu_cls(rgb_feats_cls)
-            tir_feats_cls = torch.cat((tir_unique, _cls_feats), dim=1)
+            tir_feats_cls = torch.cat((tir_unique, _cls_feats), dim=1) if self.has_unique else _cls_feats
             tir_feats_cls = tir_u_fu_cls(tir_feats_cls)
 
         featmap_sizes = bbox_pred_init.shape[2:]

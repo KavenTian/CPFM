@@ -1,0 +1,2 @@
+% bbGt version=3
+unpaired 583 215 57 191 0 0 0 0 0 0 0 0

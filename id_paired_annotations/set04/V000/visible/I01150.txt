@@ -1,0 +1,2 @@
+% bbGt version=3
+people 312 204 43 34 0 0 0 0 0 0 0 0

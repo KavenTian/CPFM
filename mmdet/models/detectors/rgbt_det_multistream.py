@@ -27,6 +27,10 @@ class RGBT_Det_MultiStream(SingleStageDetector):
                  test_cfg=None,
                  pretrained=None,
                  init_cfg=None):
+        if 'plugins' in backbone:
+            bbox_head.update(has_unique=True)
+        else:
+            bbox_head.update(has_unique=False)
         super(RGBT_Det_MultiStream, self).__init__(backbone, neck, bbox_head, 
                                    train_cfg, test_cfg, pretrained, init_cfg)
         

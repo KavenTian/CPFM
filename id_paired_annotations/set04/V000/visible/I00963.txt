@@ -1,0 +1,2 @@
+% bbGt version=3
+people 567 201 74 75 0 0 0 0 0 0 0 0

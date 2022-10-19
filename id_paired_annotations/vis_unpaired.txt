@@ -1,0 +1,16 @@
+num=15
+annotations/id_paired_annotations/set00/V002/visible/I02139.txt
+annotations/id_paired_annotations/set00/V002/visible/I02140.txt
+annotations/id_paired_annotations/set00/V002/visible/I02141.txt
+annotations/id_paired_annotations/set01/V004/visible/I01227.txt
+annotations/id_paired_annotations/set01/V004/visible/I01228.txt
+annotations/id_paired_annotations/set01/V004/visible/I01229.txt
+annotations/id_paired_annotations/set01/V004/visible/I01230.txt
+annotations/id_paired_annotations/set01/V004/visible/I01279.txt
+annotations/id_paired_annotations/set01/V004/visible/I01280.txt
+annotations/id_paired_annotations/set02/V000/visible/I00510.txt
+annotations/id_paired_annotations/set02/V000/visible/I00511.txt
+annotations/id_paired_annotations/set02/V001/visible/I01839.txt
+annotations/id_paired_annotations/set05/V000/visible/I01099.txt
+annotations/id_paired_annotations/set05/V000/visible/I01100.txt
+annotations/id_paired_annotations/set05/V000/visible/I02368.txt

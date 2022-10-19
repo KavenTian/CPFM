@@ -1,0 +1,3 @@
+% bbGt version=3
+cyclist 263 214 20 37 0 0 0 0 0 0 0 0
+person 249 219 20 32 0 0 0 0 0 0 0 1

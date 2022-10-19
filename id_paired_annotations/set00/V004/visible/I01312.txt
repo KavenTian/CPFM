@@ -1,0 +1,2 @@
+% bbGt version=3
+person 401 234 27 65 0 0 0 0 0 0 0 0

@@ -398,6 +398,7 @@ class CSPDarknetCH_MultiStream(BaseModule):
                 x3 = getattr(self, layer_name[2])(x3)
             else:
                 x3 = None
+            u_x1, u_x2 = None, None
             if self.with_plugins:
                 if len(layer_name) == 3:
                     if hasattr(self, f'b_norm_rgb_plugin_stage{i+1}'):

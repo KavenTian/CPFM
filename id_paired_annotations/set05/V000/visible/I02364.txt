@@ -1,0 +1,2 @@
+% bbGt version=3
+person 312 253 63 128 0 0 0 0 0 0 0 0

@@ -1,0 +1,4 @@
+% bbGt version=3
+person 400 225 33 67 0 0 0 0 0 0 0 0
+people 403 207 60 47 0 0 0 0 0 0 0 1
+unpaired 8 202 23 53 0 0 0 0 0 0 0 2

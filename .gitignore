@@ -1,5 +1,7 @@
 *.pth
 *.pyc
+*.tar
 .vscode
 mmdet.egg-info/
-work_dirs/
+work_dirs
+annotations/shift_test*

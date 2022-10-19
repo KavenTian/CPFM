@@ -1,0 +1,2 @@
+% bbGt version=3
+people 218 223 123 74 0 0 0 0 0 0 0 0

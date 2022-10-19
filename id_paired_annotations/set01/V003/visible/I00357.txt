@@ -1,0 +1,2 @@
+% bbGt version=3
+person 570 210 31 74 0 0 0 0 0 0 0 0

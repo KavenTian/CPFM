@@ -1,0 +1,4 @@
+% bbGt version=3
+person 80 227 44 89 0 0 0 0 0 0 0 0
+person 299 223 22 44 0 0 0 0 0 0 0 1
+unpaired 2 218 31 74 0 0 0 0 0 0 0 2

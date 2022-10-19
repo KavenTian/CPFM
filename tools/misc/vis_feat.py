@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
 from argparse import ArgumentParser
+import numpy as np
 import cv2
 
 from mmdet.apis import (async_inference_detector, inference, inference_rgbt_detector,
@@ -32,20 +33,22 @@ def backward_inf_hook(module, grad_in, grad_out):
 # def backward_pub_hook(module, grad_in, grad_out):
 #     grad_pub.append(grad_out[0].detach())
 
-def show_fmap(fmap, img, save_name):
+def show_fmap(features, img, save_name):
     img = mmcv.imread(img)
     h, w, c = img.shape
-    fmap = torch.nn.functional.interpolate(fmap, size=[h, w], mode='bilinear')
-    
-    mean_fmap = torch.mean(fmap, dim=1).squeeze()
-    mean_fmap /= torch.max(fmap) 
-    fmap = mean_fmap * 255
-    plt.imshow(img)
-    # plt.matshow(mean_fmap.cpu().numpy())
-    plt.imshow(fmap.cpu().numpy(), alpha=0.5)
-    
-    plt.savefig(save_name)
-    plt.close()
+    for i in range(len(features)):
+        fmap = features[i][0]
+        fmap = torch.nn.functional.interpolate(fmap, size=[h, w], mode='bilinear')
+        
+        mean_fmap = torch.max(fmap, dim=1)[0].squeeze()
+        mean_fmap /= torch.max(fmap) 
+        fmap = mean_fmap * 255
+        plt.imshow(img)
+        # plt.matshow(mean_fmap.cpu().numpy())
+        plt.imshow(fmap.cpu().numpy(), alpha=0.5)
+        
+        plt.savefig(f'work_dirs/yolox_kaist_3stream_2nc_coattention/{i}_max_' + save_name)
+        plt.close()
 
 def decode_offset(model, fmap:dict, pred_res:tuple, img_rgb:str, img_tir:str):
     union_bboxes = pred_res[-2][0]
@@ -77,6 +80,11 @@ def decode_offset(model, fmap:dict, pred_res:tuple, img_rgb:str, img_tir:str):
     rgb_y = rgb_y.cpu().numpy() * h + union_bboxes[:, 1:2]
     tir_x = tir_x.cpu().numpy() * w + union_bboxes[:, 0:1]
     tir_y = tir_y.cpu().numpy() * h + union_bboxes[:, 1:2]
+
+    rgb_x_mean = np.mean(rgb_x, axis=1)
+    rgb_y_mean = np.mean(rgb_y, axis=1)
+    tir_x_mean = np.mean(tir_x, axis=1)
+    tir_y_mean = np.mean(tir_y, axis=1)
 
     img_rgb = mmcv.imread(img_rgb)
     img_tir = mmcv.imread(img_tir)
@@ -113,8 +121,6 @@ def decode_offset(model, fmap:dict, pred_res:tuple, img_rgb:str, img_tir:str):
         cv2.rectangle(img_tir, tuple(bb[:2]), tuple(bb[2:]), (0,255,0), 1)   
     cv2.imwrite('work_dirs/yolox_kaist_3stream_2nc_coattention/tir_unpair_m.jpg', img_tir)
 
-
-
     return
 
 
@@ -127,7 +133,7 @@ def parse_args():
     parser.add_argument(
         '--device', default='cuda:0', help='Device used for inference')
     parser.add_argument(
-        '--score-thr', type=float, default=0.3, help='bbox score threshold')
+        '--score-thr', type=float, default=0.0, help='bbox score threshold')
     parser.add_argument('--with_neck', default=False),
     parser.add_argument(
         '--async-test',
@@ -150,6 +156,13 @@ def main(args, fmap_block, input_block, grads):
     # model.backbone.stage4_s3.register_backward_hook(backward_pub_hook)
     model.bbox_head.shared_rgb_reg_offset_convs.register_forward_hook(forward_vis_hook)
     model.bbox_head.shared_tir_reg_offset_convs.register_forward_hook(forward_inf_hook)
+    # model.bbox_head.rgb_multi_level_reg_convs[0].register_forward_hook(forward_vis_hook)
+    # model.bbox_head.rgb_multi_level_reg_convs[1].register_forward_hook(forward_vis_hook)
+    # model.bbox_head.rgb_multi_level_reg_convs[2].register_forward_hook(forward_vis_hook)
+    # model.bbox_head.tir_multi_level_reg_convs[0].register_forward_hook(forward_inf_hook)
+    # model.bbox_head.tir_multi_level_reg_convs[1].register_forward_hook(forward_inf_hook)
+    # model.bbox_head.tir_multi_level_reg_convs[2].register_forward_hook(forward_inf_hook)
+
     model.bbox_head.set_debug('pair_bboxes_nms',[['valid_mask', 'keep']])
 
     
@@ -158,6 +171,8 @@ def main(args, fmap_block, input_block, grads):
         imgs = [args.img_vis, args.img_inf]
         result = inference_rgbt_detector(model, imgs)
 
+        # show_fmap(input_block['vis'], args.img_vis, args.img_vis.split('/')[-1])
+        # show_fmap(input_block['inf'], args.img_inf, args.img_inf.split('/')[-1])
         decode_offset(model, fmap_block, result, args.img_vis, args.img_inf)
 
         def f(x, i):

@@ -1,0 +1,2 @@
+% bbGt version=3
+person 501 212 26 63 0 0 0 0 0 0 0 0

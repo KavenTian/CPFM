@@ -1,0 +1,2 @@
+% bbGt version=3
+person 377 251 88 243 0 0 0 0 0 0 0 0

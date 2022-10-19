@@ -1,0 +1,2 @@
+% bbGt version=3
+person 407 201 18 47 0 0 0 0 0 0 0 0
