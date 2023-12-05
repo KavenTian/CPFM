@@ -4,4 +4,5 @@
 2. The configs used in paper are:      
    ./configs/multispec/yolox_kaist_3stream_2nc_coattention.py           
    ./configs/multispec/yolox_kaist_3stream_2nc_coattention_cvc14.py    
-3. Other usage is the same as [mmdet](https://github.com/open-mmlab/mmdetection).
+3. You should have some minor changes on configs(i.e. some PATH) to fit your environment.     
+4. Other usage is the same as [mmdet](https://github.com/open-mmlab/mmdetection).
