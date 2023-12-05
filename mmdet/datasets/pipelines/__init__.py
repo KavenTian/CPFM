@@ -16,6 +16,8 @@ from .transforms import (Albu, CutOut, Expand, MinIoURandomCrop, MixUp, Mosaic,
                          RandomShift, Resize, SegRescale, YOLOXHSVRandomAug)
 from .get_union_box import UnionBox
 from .homo import Homography
+from .testTimeaug import TestTimeAug
+from .modal_aug import ModalAug
 
 __all__ = [
     'Compose', 'to_tensor', 'ToTensor', 'ImageToTensor', 'ToDataContainer',
@@ -28,5 +30,5 @@ __all__ = [
     'Rotate', 'ColorTransform', 'EqualizeTransform', 'BrightnessTransform',
     'ContrastTransform', 'Translate', 'RandomShift', 'Mosaic', 'MixUp',
     'RandomAffine', 'YOLOXHSVRandomAug', 'LoadMultiModalImageFromFiles', 
-    'Resize_Multi', 'UnionBox', 'Homography'
+    'Resize_Multi', 'UnionBox', 'Homography', 'TestTimeAug', 'ModalAug'
 ]

@@ -6,8 +6,10 @@ from ..builder import PIPELINES
 
 @PIPELINES.register_module()
 class UnionBox:
-    def __init__(self) -> None:
-        pass
+    def __init__(self, single_modal=None) -> None:
+        # if single_modal is setted, choose only one modality as a surpervision
+        assert single_modal in [None, 'rgb', 'tir']
+        self.single_modal = single_modal
 
     def __call__(self, results:dict):
         bboxes = copy.deepcopy(results['gt_bboxes'])
@@ -25,7 +27,12 @@ class UnionBox:
             tir_inds = np.where(local_person_ids[1] == i)[0]
             tir_bbox = bboxes[1][tir_inds]
             tir_label = labels[1][tir_inds]
-            assert rgb_inds.shape[0] <= 1 and tir_inds.shape[0] <= 1
+            # assert rgb_inds.shape[0] <= 1 and tir_inds.shape[0] <= 1
+            if rgb_inds.shape[0] > 1 or tir_inds.shape[0] > 1:
+                print('Person ID Error!')
+                print(local_person_ids[0])
+                print(local_person_ids[1])
+                assert False
             assert rgb_inds.shape[0] + tir_inds.shape[0] > 0
             if rgb_bbox.shape[0] > 0:
                 assert rgb_bbox.shape[-1] == 4
@@ -33,11 +40,16 @@ class UnionBox:
                 assert tir_bbox.shape[-1] == 4
 
             if rgb_bbox.shape[0] + tir_bbox.shape[0] == 2:
-                x1 = min(rgb_bbox[0, 0], tir_bbox[0, 0])
-                x2 = max(rgb_bbox[0, 2], tir_bbox[0, 2])
-                y1 = min(rgb_bbox[0, 1], tir_bbox[0, 1])
-                y2 = max(rgb_bbox[0, 3], tir_bbox[0, 3])
-                union_bboxes[i, :] = np.array([x1, y1, x2, y2], dtype=np.float32)
+                if self.single_modal == 'rgb':
+                    union_bboxes[i, :] = rgb_bbox[0]
+                elif self.single_modal == 'tir':
+                    union_bboxes[i, :] = tir_bbox[0]
+                else:
+                    x1 = min(rgb_bbox[0, 0], tir_bbox[0, 0])
+                    x2 = max(rgb_bbox[0, 2], tir_bbox[0, 2])
+                    y1 = min(rgb_bbox[0, 1], tir_bbox[0, 1])
+                    y2 = max(rgb_bbox[0, 3], tir_bbox[0, 3])
+                    union_bboxes[i, :] = np.array([x1, y1, x2, y2], dtype=np.float32)
                 union_labels[i] = rgb_label
             elif rgb_bbox.shape[0] == 1:
                 union_bboxes[i, :] = rgb_bbox[0]

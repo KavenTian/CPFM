@@ -197,7 +197,7 @@ class RGBT_Det_MultiStream(SingleStageDetector):
                     text_color=(72, 101, 241),
                     mask_color=None,
                     thickness=2,
-                    font_size=13,
+                    font_size=16,
                     win_name='',
                     show=False,
                     wait_time=0,
@@ -206,12 +206,15 @@ class RGBT_Det_MultiStream(SingleStageDetector):
         img_rgb, img_tir = img.copy()
         
         rgb_bbox, tir_bbox = result[:2]
+        union_bbox = result[-2]
         
         rgb_labels = np.concatenate([
             np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(rgb_bbox)])
         tir_labels = np.concatenate([
             np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(tir_bbox)])
-        
+        union_labels = np.concatenate([
+            np.full(bbox.shape[0], i, dtype=np.int32) for i, bbox in enumerate(union_bbox)])
+
         f = lambda x: np.concatenate(x, axis=0)
         rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, union_bboxes, anchor_scores \
             = list(map(f, result))   
@@ -219,7 +222,8 @@ class RGBT_Det_MultiStream(SingleStageDetector):
         assert len(rgb_bboxes) == len(rgb_ids) == len(rgb_scores) == len(rgb_labels) and \
                len(tir_bboxes) == len(tir_ids) == len(tir_scores) == len(tir_labels) and \
                len(union_bboxes) == len(anchor_scores)
-        
+        union_ids = np.array([i for i in range(len(union_bboxes))], dtype=rgb_ids.dtype)
+
         # use "labels" key_word to mark person ids
         class_names = [str(i) for i in range(len(anchor_scores))]          
         
@@ -234,12 +238,29 @@ class RGBT_Det_MultiStream(SingleStageDetector):
             labels=rgb_labels,
             class_names=class_names,
             score_thr=score_thr,
-            bbox_color=bbox_color,
-            text_color=text_color,
+            bbox_color=(0,255,0),
+            text_color=(0,255,0),
+            # bbox_color=(255,69,0),
+            # text_color=(255,69,0),
             thickness=thickness,
             font_size=font_size,
             win_name=win_name,
             wait_time=wait_time)
+
+        # rgb_out = imshow_det_bboxes(
+        #     rgb_out,
+        #     union_bboxes,
+        #     scores=anchor_scores,
+        #     person_id=union_ids,
+        #     labels=union_labels,
+        #     class_names=class_names,
+        #     score_thr=score_thr,
+        #     bbox_color=(255,255,0),
+        #     text_color=(255,255,0),
+        #     thickness=thickness,
+        #     font_size=font_size,
+        #     win_name=win_name,
+        #     wait_time=wait_time) 
 
         tir_out = imshow_det_bboxes(
             img_tir,
@@ -249,19 +270,35 @@ class RGBT_Det_MultiStream(SingleStageDetector):
             labels=tir_labels,
             class_names=class_names,
             score_thr=score_thr,
-            bbox_color=bbox_color,
-            text_color=text_color,
+            bbox_color=(0,255,0),
+            text_color=(0,255,0),
             thickness=thickness,
             font_size=font_size,
             win_name=win_name,
             wait_time=wait_time)
+
+        # tir_out = imshow_det_bboxes(
+        #     tir_out,
+        #     union_bboxes,
+        #     scores=anchor_scores,
+        #     person_id=union_ids,
+        #     labels=union_labels,
+        #     class_names=class_names,
+        #     score_thr=score_thr,
+        #     bbox_color=(255,255,0),
+        #     text_color=(255,255,0),
+        #     thickness=thickness,
+        #     font_size=font_size,
+        #     win_name=win_name,
+        #     wait_time=wait_time)
 
         img = np.concatenate((rgb_out, tir_out), axis=1)
 
         if not (show or out_file):
             return img
 
-        mmcv.imwrite(img, out_file)
+        mmcv.imwrite(rgb_out, out_file[:-4]+'_rgb'+out_file[-4:])
+        mmcv.imwrite(tir_out, out_file[:-4]+'_tir'+out_file[-4:])
 
 
 EPS = 1e-2
@@ -324,8 +361,16 @@ def imshow_det_bboxes(img,
 
         horizontal_alignment = 'left'
         positions = bboxes[:, :2].astype(np.int32) + thickness
+
+        person_id = np.zeros_like(person_id, dtype=np.int64)
+        class_names = ['person']
+        scores *= 100.
+
         areas = (bboxes[:, 3] - bboxes[:, 1]) * (bboxes[:, 2] - bboxes[:, 0])
         scales = _get_adaptive_scales(areas)
+        # positions = bboxes[:, :2].astype(np.int32) - \
+        #             np.repeat(np.array([[0,font_size*1.5]], dtype=np.int32), bboxes.shape[0], axis=0) *\
+        #             scales.reshape(scales.shape[0], 1)
         
         draw_labels(
             ax,

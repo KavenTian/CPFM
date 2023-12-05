@@ -73,6 +73,7 @@ class MultiSpeHead(YOLOXHead):
                      reduction='sum',
                      loss_weight=1.0),
                  loss_l1=dict(type='L1Loss', reduction='sum', loss_weight=1.0),
+                 use_unpair_weights=False,
                  train_cfg=None,
                  test_cfg=None,
                  init_cfg=dict(
@@ -108,12 +109,13 @@ class MultiSpeHead(YOLOXHead):
 
         self.use_l1 = False  # This flag will be modified by hooks.
         self.loss_l1 = build_loss(loss_l1)
+        self.use_unpair_weights = use_unpair_weights
 
         self.prior_generator = MlvlPointGenerator(strides, offset=0)
 
         self.test_cfg = test_cfg
         self.train_cfg = train_cfg
-        if not use_cls_branch:
+        if not use_cls_branch and self.train_cfg != None:
             self.train_cfg['assigner']['cls_weight'] = 0.
 
         self.sampling = False
@@ -126,9 +128,13 @@ class MultiSpeHead(YOLOXHead):
         self.debug = False
         self.fp16_enabled = False
         
-        assert align in ['star', 'border', 'deform']
+        if align:
+            assert align in ['star', 'border', 'deform', ]
         self.align = align
-        if align == 'border':
+        if not align:
+            self.multiplier = 1
+            print("\nUse no align !")
+        elif align == 'border':
             self.feat_align = BorderAlign(pool_size=10)
             self.multiplier = 5
         elif align == 'star':
@@ -144,7 +150,7 @@ class MultiSpeHead(YOLOXHead):
             self.dcn_group = dcn_group
             self.dcn_kernel, self.dcn_pad, self.dcn_base_offset = self.make_dcn_offset(self.num_points)
             self.multiplier = 1
-            
+
         else:
             raise Exception("Not supported")
 
@@ -516,6 +522,9 @@ class MultiSpeHead(YOLOXHead):
         dcn_offset -= dcn_base_offset.repeat(1, self.offset_group, 1, 1)
         outs = nn.ReLU(inplace=True)(dcn_module(feats, dcn_offset))
         return outs
+
+    def None_align(self, feats, *kargs):
+        return feats
     
     def get_refined_bbox(self, bbox_init, delta):
         wh_init = bbox_init[...,2:] - bbox_init[...,:2]
@@ -686,7 +695,7 @@ class MultiSpeHead(YOLOXHead):
         
         return losses
 
-    @force_fp32(apply_to=fp32_apply_cls)
+    @force_fp32(apply_to=fp32_apply_nocls)
     def loss(self,
              rgb_bbox_delta,
              tir_bbox_delta,
@@ -760,7 +769,7 @@ class MultiSpeHead(YOLOXHead):
                         flatten_priors.unsqueeze(0).repeat(N, 1, 1),
                         flatten_union_bboxes.detach(),
                         gt_bboxes_union,
-                        gt_labels_union if self.use_cls_branch else [None, None],
+                        gt_labels_union if self.use_cls_branch else [None]*len(gt_bboxes_union),
                         flatten_rgb_delta.detach(),
                         flatten_tir_delta.detach(),
                         local_person_ids_rgb,
@@ -823,6 +832,16 @@ class MultiSpeHead(YOLOXHead):
         del _tir_target, tir_target, tir_num_fg_imgs
         if not self.use_l1: del tir_l1_targets
 
+        '''get unpair weight'''
+        if self.use_unpair_weights:
+            rgb_weights, tir_weights = self.unpair_weight(
+                                rgb_obj_targets, tir_obj_targets,
+                                flatten_obj_rgb.view(-1, 1), flatten_obj_tir.view(-1, 1), 
+                                alpha=2.,
+                                gamma=2.)
+        else:
+            rgb_weights, tir_weights = None, None
+        
         '''caculate loss'''
         loss_bbox_union = self.loss_bbox(
             flatten_union_bboxes.view(-1, 4)[union_pos_masks], union_bbox_targets)\
@@ -833,13 +852,13 @@ class MultiSpeHead(YOLOXHead):
         loss_bbox_rgb = self.loss_bbox(
             flatten_rgb_bboxes.view(-1, 4)[rgb_pos_masks], rgb_bbox_targets)\
                 / rgb_num_total_samples
-        loss_obj_rgb = self.loss_obj(flatten_obj_rgb.view(-1, 1), rgb_obj_targets)\
+        loss_obj_rgb = self.loss_obj(flatten_obj_rgb.view(-1, 1), rgb_obj_targets, weight=rgb_weights)\
                 / rgb_num_total_samples
 
         loss_bbox_tir = self.loss_bbox(
             flatten_tir_bboxes.view(-1, 4)[tir_pos_masks], tir_bbox_targets)\
                 / tir_num_total_samples
-        loss_obj_tir = self.loss_obj(flatten_obj_tir.view(-1, 1), tir_obj_targets)\
+        loss_obj_tir = self.loss_obj(flatten_obj_tir.view(-1, 1), tir_obj_targets, weight=tir_weights)\
                 / tir_num_total_samples
 
         loss_dict = dict(
@@ -1136,8 +1155,17 @@ class MultiSpeHead(YOLOXHead):
             #                     rgb_score_factor,
             #                     tir_score_factor,
             #                     union_score_factor,
-            #                     self.test_cfg)
-            # )
+            #                     self.test_cfg))
+            # result_list.append(
+            #     self.decouple_nms(rgb_cls_scores,
+            #                     tir_cls_scores,
+            #                     rgb_bboxes,
+            #                     tir_bboxes,
+            #                     union_bboxes,
+            #                     rgb_score_factor,
+            #                     tir_score_factor,
+            #                     union_score_factor,
+            #                     self.test_cfg))
 
         return result_list
 
@@ -1176,7 +1204,7 @@ class MultiSpeHead(YOLOXHead):
         min_scr, min_idx = modal_scores.min(dim=1)
         max_scr, _ = modal_scores.max(dim=1)
         scr_mask = max_scr > scr_mul * min_scr
-        second_scr_mask = min_scr < 10 * cfg.score_thr
+        second_scr_mask = min_scr < 1 * cfg.score_thr # hyper 10
         scr_mask = scr_mask & second_scr_mask
         _min_idx = min_idx[scr_mask].unsqueeze(-1)
         min_mask = scr_mask.new_full((len(_min_idx), 2), 0, dtype=torch.bool)
@@ -1309,6 +1337,75 @@ class MultiSpeHead(YOLOXHead):
         return rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores,\
                    rgb_labels, tir_labels, union_bboxes, union_score_factor
 
+    def decouple_nms(self, 
+                   rgb_cls_scores,
+                   tir_cls_scores,
+                   rgb_bboxes,
+                   tir_bboxes,
+                   union_bboxes,
+                   rgb_score_factor,
+                   tir_score_factor,
+                   union_score_factor,
+                   cfg):
+        rgb_dets, rgb_labels, rgb_mask, rgb_keep = \
+            self._bboxes_nms(rgb_cls_scores.unsqueeze(1), rgb_bboxes, rgb_score_factor, cfg)
+        if rgb_dets.numel() == 0:
+            rgb_bboxes = rgb_dets
+            rgb_scores = rgb_bboxes.new_full((len(rgb_bboxes), ), 0, dtype=torch.float32)
+        else:
+            rgb_bboxes = rgb_dets[:, :4]
+            rgb_scores = rgb_dets[:, 4]
+        rgb_ids = rgb_bboxes.new_full((len(rgb_bboxes),), 0, dtype=rgb_labels.dtype)
+
+        tir_dets, tir_labels, tir_mask, tir_keep = \
+            self._bboxes_nms(tir_cls_scores.unsqueeze(1), tir_bboxes, tir_score_factor, cfg)
+        if tir_dets.numel() == 0:
+            tir_bboxes = tir_dets
+            tir_scores = tir_bboxes.new_full((len(tir_bboxes), ), 0, dtype=torch.float32)
+        else:
+            tir_bboxes = tir_dets[:, :4]
+            tir_scores = tir_dets[:, 4]
+        tir_ids = tir_bboxes.new_full((len(tir_bboxes),), 0, dtype=tir_labels.dtype)
+
+        union_cls_scores = torch.ones_like(union_score_factor)
+        union_dets, union_labels, union_mask, union_keep = \
+            self._bboxes_nms(union_cls_scores.unsqueeze(1), union_bboxes, union_score_factor, cfg)
+        if union_dets.numel() == 0:
+            union_bboxes = union_dets
+            union_scores = union_bboxes.new_full((len(union_bboxes), ), 0, dtype=torch.float32)
+        else:
+            union_bboxes = union_dets[:, :4]
+            union_scores = union_dets[:, 4]
+
+        if self.debug:
+                now_func = inspect.stack()[0][3]
+                if now_func in self.debug:
+                    for var in self.debug[now_func]:
+                        try:
+                            val=eval(var)
+                        except NameError as e:
+                            print(e)
+                        else:
+                            self.debug[now_func][var] = val
+        
+        return rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores,\
+                   rgb_labels, tir_labels, union_bboxes, union_scores
+    
+    
+    def _bboxes_nms(self, cls_scores, bboxes, score_factor, cfg):
+        max_scores, labels = torch.max(cls_scores, 1)
+        valid_mask = score_factor * max_scores >= cfg.score_thr
+
+        bboxes = bboxes[valid_mask]
+        scores = max_scores[valid_mask] * score_factor[valid_mask]
+        labels = labels[valid_mask]
+
+        if labels.numel() == 0:
+            return bboxes, labels, valid_mask, labels.new_full((len(labels), ), 0, dtype=torch.int64)
+        else:
+            dets, keep = batched_nms(bboxes, scores, labels, cfg.nms)
+            return dets, labels[keep], valid_mask, keep
+
     def set_debug(self, func_names:list, var_names:list):
         func_names = [func_names] if isinstance(func_names, str) else func_names
         var_names = [var_names] if isinstance(var_names, str) else var_names
@@ -1325,3 +1422,16 @@ class MultiSpeHead(YOLOXHead):
             else:
                 print(f'Has no func {func}')     
         return
+
+    @staticmethod
+    def unpair_weight(rgb_obj_target, tir_obj_target, rgb_obj_pred, tir_obj_pred, alpha, gamma):
+        unpair_ind = rgb_obj_target != tir_obj_target
+        A = alpha * unpair_ind.to(torch.float32)
+        
+        rgb_weights = 1. + rgb_obj_target * (1. - rgb_obj_pred.sigmoid()).pow(gamma) * A + \
+                        (1. - rgb_obj_target) * rgb_obj_pred.sigmoid().pow(gamma) * A
+        
+        tir_weights = 1. + tir_obj_target * (1. - tir_obj_pred.sigmoid()).pow(gamma) * A + \
+                        (1. - tir_obj_target) * tir_obj_pred.sigmoid().pow(gamma) * A
+
+        return rgb_weights, tir_weights

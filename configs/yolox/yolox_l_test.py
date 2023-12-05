@@ -1,5 +1,5 @@
 
-img_scale = (512, 640)  # height, width
+img_scale = (640, 640)  # height, width
 
 # model settings
 model = dict(
@@ -24,7 +24,6 @@ model = dict(
     test_cfg=dict(score_thr=0.01, nms=dict(type='nms', iou_threshold=0.65)))
 
 # dataset settings
-data_root = '/data/kaist_clean/'
 dataset_type = 'CocoDataset'
 classes = ('person',)
 
@@ -56,18 +55,20 @@ train_pipeline = [
     dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])
 ]
 
+modality = 'rgb'
+
 train_dataset = dict(
     type='MultiImageMixDataset',
     dataset=dict(
         type=dataset_type,
-        ann_file=data_root + 'annotations/train_tir.json',
+        ann_file=f'/data/CVC-14/train_{modality}.json',
         classes=classes,
-        img_prefix=data_root + 'images/',
+        img_prefix='/data/CVC-14/images',
         pipeline=[
             dict(type='LoadImageFromFile'),
             dict(type='LoadAnnotations', with_bbox=True)
         ],
-        filter_empty_gt=False,
+        filter_empty_gt=True,
     ),
     pipeline=train_pipeline)
 
@@ -75,7 +76,7 @@ test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(
         type='MultiScaleFlipAug',
-        img_scale=img_scale,
+        img_scale=(480, 640),
         flip=False,
         transforms=[
             dict(type='Resize', keep_ratio=True),
@@ -97,31 +98,32 @@ data = dict(
     val=dict(
         type=dataset_type,
         classes=classes,
-        ann_file=data_root + 'annotations/val_tir.json',
-        img_prefix=data_root + 'images/',
+        ann_file=f'/data/CVC-14/val_{modality}.json',
+        img_prefix='/data/CVC-14/images',
         pipeline=test_pipeline),
     test=dict(
         type=dataset_type,
         classes=classes,
-        ann_file=data_root + 'annotations/val_tir.json',
-        img_prefix=data_root + 'images/',
+        ann_file=f'/data/CVC-14/val_{modality}.json',
+        img_prefix='/data/CVC-14/images',
         pipeline=test_pipeline))
 
 # optimizer
 # default 8 gpu
 optimizer = dict(
     type='SGD',
-    lr=0.02,
+    lr=0.005,
     momentum=0.9,
     weight_decay=5e-4,
     nesterov=True,
     paramwise_cfg=dict(norm_decay_mult=0., bias_decay_mult=0.))
 optimizer_config = dict(grad_clip=None)
 
-max_epochs = 14
+max_epochs = 16
 num_last_epochs = 1
 resume_from = None
-interval = 10
+interval = 1
+dist_params = dict(backend='nccl')
 
 # learning policy
 # lr_config = dict(
@@ -140,8 +142,8 @@ lr_config = dict(
     warmup_by_epoch=True,
     warmup_ratio=0.0001,
     warmup_iters=2,
-    step=15,
-    # gamma=0.5,
+    step=14,
+    gamma=0.1,
     )
 
 runner = dict(type='EpochBasedRunner', max_epochs=max_epochs)

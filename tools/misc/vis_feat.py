@@ -34,21 +34,22 @@ def backward_inf_hook(module, grad_in, grad_out):
 #     grad_pub.append(grad_out[0].detach())
 
 def show_fmap(features, img, save_name):
-    img = mmcv.imread(img)
+    if isinstance(img, str):
+        img = mmcv.imread(img)
+    
     h, w, c = img.shape
-    for i in range(len(features)):
-        fmap = features[i][0]
-        fmap = torch.nn.functional.interpolate(fmap, size=[h, w], mode='bilinear')
-        
-        mean_fmap = torch.max(fmap, dim=1)[0].squeeze()
-        mean_fmap /= torch.max(fmap) 
-        fmap = mean_fmap * 255
-        plt.imshow(img)
-        # plt.matshow(mean_fmap.cpu().numpy())
-        plt.imshow(fmap.cpu().numpy(), alpha=0.5)
-        
-        plt.savefig(f'work_dirs/yolox_kaist_3stream_2nc_coattention/{i}_max_' + save_name)
-        plt.close()
+
+    fmap = torch.nn.functional.interpolate(features, size=[h, w], mode='bilinear')
+    
+    mean_fmap = torch.max(fmap, dim=1)[0].squeeze()
+    mean_fmap /= torch.max(fmap) 
+    fmap = mean_fmap * 255
+    plt.imshow(img)
+    # plt.matshow(mean_fmap.cpu().numpy())
+    plt.imshow(fmap.cpu().numpy(), alpha=0.5)
+    
+    plt.savefig('work_dirs/yolox_kaist_3stream_2nc_coattention/max_' + save_name)
+    plt.close()
 
 def decode_offset(model, fmap:dict, pred_res:tuple, img_rgb:str, img_tir:str):
     union_bboxes = pred_res[-2][0]
@@ -152,10 +153,11 @@ def main(args, fmap_block, input_block, grads):
     #     model.backbone.stage2.register_forward_hook(forward_pub_hook)
     # print(model.neck.out_convs[0])
     
-    # model.backbone.stage4_s3.register_forward_hook(forward_pub_hook)
+    model.backbone.stage3_s1.register_forward_hook(forward_vis_hook)
+    model.backbone.stage3_s2.register_forward_hook(forward_inf_hook)
     # model.backbone.stage4_s3.register_backward_hook(backward_pub_hook)
-    model.bbox_head.shared_rgb_reg_offset_convs.register_forward_hook(forward_vis_hook)
-    model.bbox_head.shared_tir_reg_offset_convs.register_forward_hook(forward_inf_hook)
+    # model.bbox_head.shared_rgb_reg_offset_convs.register_forward_hook(forward_vis_hook)
+    # model.bbox_head.shared_tir_reg_offset_convs.register_forward_hook(forward_inf_hook)
     # model.bbox_head.rgb_multi_level_reg_convs[0].register_forward_hook(forward_vis_hook)
     # model.bbox_head.rgb_multi_level_reg_convs[1].register_forward_hook(forward_vis_hook)
     # model.bbox_head.rgb_multi_level_reg_convs[2].register_forward_hook(forward_vis_hook)
@@ -163,22 +165,106 @@ def main(args, fmap_block, input_block, grads):
     # model.bbox_head.tir_multi_level_reg_convs[1].register_forward_hook(forward_inf_hook)
     # model.bbox_head.tir_multi_level_reg_convs[2].register_forward_hook(forward_inf_hook)
 
-    model.bbox_head.set_debug('pair_bboxes_nms',[['valid_mask', 'keep']])
-
+    # model.bbox_head.set_debug('pair_bboxes_nms',[['valid_mask', 'keep']])
+    # model.bbox_head.set_debug('decouple_nms',[['rgb_mask', 'rgb_keep', 'tir_mask', 'tir_keep']])
     
     if args.img_vis.endswith(('.jpg', '.png')) and args.img_inf.endswith(('.jpg', '.png')):
         # test a single image
-        imgs = [args.img_vis, args.img_inf]
-        result = inference_rgbt_detector(model, imgs)
+        imgs = [args.img_vis, args.img_inf] 
+        result, imgs_in = inference_rgbt_detector(model, imgs, out_img=True)
+        rgb_in = imgs_in[0].squeeze()[:3,:,:].cpu().numpy()
+        tir_in = imgs_in[0].squeeze()[3:,:,:].cpu().numpy()
+        # debug_dict = model.bbox_head.debug
 
-        # show_fmap(input_block['vis'], args.img_vis, args.img_vis.split('/')[-1])
-        # show_fmap(input_block['inf'], args.img_inf, args.img_inf.split('/')[-1])
-        decode_offset(model, fmap_block, result, args.img_vis, args.img_inf)
+        # pair-wise
+        # valid_mask = debug_dict['pair_bboxes_nms']['valid_mask']
+        # keep = debug_dict['pair_bboxes_nms']['keep']
+        # anchor_idx = torch.arange(6720)[valid_mask][keep]
+        
+        # anchor_idx = anchor_idx.numpy().tolist()
+        # x_c, y_c = [], []
+        # for item in anchor_idx:
+        #     if item < 5120:
+        #         x_c.append((item % 80) * 8 + 4)
+        #         y_c.append((item // 80) * 8 + 4)
+        #     elif item < 6400:
+        #         x_c.append(((item - 5120) % 40) * 16 + 8)
+        #         y_c.append(((item - 5120) // 40) * 16 + 8)
+        #     else:
+        #         x_c.append(((item - 6400) % 20) * 32 + 16)
+        #         y_c.append(((item - 6400) // 20) * 32 + 16)
 
-        def f(x, i):
-            return x.permute(0, 3, 1, 2).reshape(1, -1, 64//(2**i), 80//(2**i))
-        reg_rgb = [f(fmap_block['pub'][i*4], i) for i in range(3)]
-        reg_tir = [f(fmap_block['pub'][i*4+1], i) for i in range(3)]
+        # H = np.array([[1, 0, 6], [0, 1, 0]], dtype=np.float32)
+        # img_in_vis = mmcv.imread(args.img_vis)
+        # img_in_tir = mmcv.imread(args.img_inf)
+        # tir_out = cv2.warpAffine(img_in_tir, H, (img_in_tir.shape[1], img_in_tir.shape[0]), 
+        #                 borderMode=cv2.BORDER_REPLICATE)
+
+        # # img_in_vis = mmcv.imread(args.img_vis)
+        # # img_in_tir = mmcv.imread(args.img_inf)
+        # for i in range(len(x_c)):
+        #     cv2.circle(img_in_vis, (x_c[i], y_c[i]), 5, [245,100,84], cv2.FILLED)
+        #     cv2.circle(tir_out, (x_c[i], y_c[i]), 5, [245,100,84], cv2.FILLED)
+        # # img_out = np.concatenate((img_in_vis, tir_out), axis=1)
+        # cv2.imwrite('/workspace/work_dirs/yolox_kaist_3stream_2nc_coattention/pair_wise_rgb.png', img_in_vis)
+        # cv2.imwrite('/workspace/work_dirs/yolox_kaist_3stream_2nc_coattention/pair_wise_tir.png', tir_out)
+        
+        # decoupled-nms
+        # rgb_mask = debug_dict['decouple_nms']['rgb_mask']
+        # rgb_keep = debug_dict['decouple_nms']['rgb_keep']
+        # tir_mask = debug_dict['decouple_nms']['tir_mask']
+        # tir_keep = debug_dict['decouple_nms']['tir_keep']
+        # rgb_anchor_idx = torch.arange(6720)[rgb_mask][rgb_keep]
+        # tir_anchor_idx = torch.arange(6720)[tir_mask][tir_keep]
+
+        # rgb_anchor_idx = rgb_anchor_idx.numpy().tolist()
+        # x_rgb, y_rgb = [], []
+        # for item in rgb_anchor_idx:
+        #     if item < 5120:
+        #         x_rgb.append((item % 80) * 8 + 4)
+        #         y_rgb.append((item // 80) * 8 + 4)
+        #     elif item < 6400:
+        #         x_rgb.append(((item - 5120) % 40) * 16 + 8)
+        #         y_rgb.append(((item - 5120) // 40) * 16 + 8)
+        #     else:
+        #         x_rgb.append(((item - 6400) % 20) * 32 + 16)
+        #         y_rgb.append(((item - 6400) // 20) * 32 + 16)
+
+        # tir_anchor_idx = tir_anchor_idx.numpy().tolist()
+        # x_tir, y_tir = [], []
+        # for item in tir_anchor_idx:
+        #     if item < 5120:
+        #         x_tir.append((item % 80) * 8 + 4)
+        #         y_tir.append((item // 80) * 8 + 4)
+        #     elif item < 6400:
+        #         x_tir.append(((item - 5120) % 40) * 16 + 8)
+        #         y_tir.append(((item - 5120) // 40) * 16 + 8)
+        #     else:
+        #         x_tir.append(((item - 6400) % 20) * 32 + 16)
+        #         y_tir.append(((item - 6400) // 20) * 32 + 16)
+
+
+        # # # img_in_vis = mmcv.imread(args.img_vis)
+        # # # img_in_tir = mmcv.imread(args.img_inf)
+        # img_in_vis = mmcv.imread('/workspace/work_dirs/yolox_kaist_3stream_2nc_coattention/pair_wise_rgb.png')
+        # for i in range(len(x_rgb)):
+        #     cv2.circle(img_in_vis, (x_rgb[i], y_rgb[i]), 5, [39,108,245], cv2.FILLED)
+        #     # cv2.circle(img_in, (y_rgb[i], x_rgb[i]), 1, [0,0,255], 2)
+        # img_in_tir = mmcv.imread('/workspace/work_dirs/yolox_kaist_3stream_2nc_coattention/pair_wise_tir.png')
+        # for i in range(len(x_tir)):
+        #     cv2.circle(img_in_tir, (x_tir[i], y_tir[i]), 5, [15,202,85], cv2.FILLED)
+        #     # cv2.circle(img_in, (y_tir[i], x_tir[i]), 1, [0,255,0], 2)
+        # # img_out = np.concatenate((img_in_vis, img_in_tir), axis=1)
+        # cv2.imwrite('/workspace/work_dirs/yolox_kaist_3stream_2nc_coattention/decoupled_nms_rgb.png', img_in_vis)
+        # cv2.imwrite('/workspace/work_dirs/yolox_kaist_3stream_2nc_coattention/decoupled_nms_tir.png', img_in_tir)
+        # # show_fmap(input_block['vis'], args.img_vis, args.img_vis.split('/')[-1])
+        # # show_fmap(input_block['inf'], args.img_inf, args.img_inf.split('/')[-1])
+        # decode_offset(model, fmap_block, result, args.img_vis, args.img_inf)
+
+        # def f(x, i):
+        #     return x.permute(0, 3, 1, 2).reshape(1, -1, 64//(2**i), 80//(2**i))
+        # reg_rgb = [f(fmap_block['pub'][i*4], i) for i in range(3)]
+        # reg_tir = [f(fmap_block['pub'][i*4+1], i) for i in range(3)]
         # show the results
         # vis backbone
         show_fmap(fmap_block['vis'][0], args.img_vis, args.img_vis.split('/')[-1])

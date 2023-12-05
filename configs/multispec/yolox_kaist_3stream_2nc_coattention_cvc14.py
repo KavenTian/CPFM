@@ -1,7 +1,7 @@
 _base_ = [
-    'configs/_base_/datasets/coco_detection.py',
-    # 'configs/_base_/schedules/schedule_1x.py',
-     'configs/_base_/default_runtime.py'
+    # '../_base_/datasets/coco_detection.py',
+    # '../_base_/schedules/schedule_1x.py',
+     '../_base_/default_runtime.py'
 ]
 
 
@@ -18,33 +18,27 @@ model = dict(
         stream=2,
         plugins=[
             # dict(
-            # cfg=dict(type='CoCrossAttention', pos_shape=[512//4, 640//4], pos_dim=128, d_model=128),
-            # position='after_stage1'
-            # ),
-            dict(
-            cfg=dict(type='CoCrossAttention', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
+            # cfg=dict(type='CoCrossAttention', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
+            # position='after_stage2'),
+            # dict(
+            # cfg=dict(type='CoCrossAttention', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
+            # position='after_stage3'),
+            # dict(
+            # cfg=dict(type='CoCrossAttention', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
+            # position='after_stage4'),
+
+        dict(
+            cfg=dict(type='CoAttention', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
             position='after_stage2'
             ),
-            # dict(
-            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//8, 640//8], pos_dim=256, d_model=256, nhead=4, dim_feedforward=1024),
-            # position='after_stage2'
-            # ),
             dict(
-            cfg=dict(type='CoCrossAttention', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
+            cfg=dict(type='CoAttention', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
             position='after_stage3'
             ),
-            # dict(
-            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//16, 640//16], pos_dim=512, d_model=512, nhead=4, dim_feedforward=1024),
-            # position='after_stage3'
-            # ),
             dict(
-            cfg=dict(type='CoCrossAttention', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
+            cfg=dict(type='CoAttention', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
             position='after_stage4'
             ),
-            # dict(
-            # cfg=dict(type='CoCrossAttentionCopy', pos_shape=[512//32, 640//32], pos_dim=1024, d_model=1024, nhead=4, dim_feedforward=1024),
-            # position='after_stage4'
-            # )
         ]
     ),
     # backbone=dict(
@@ -69,6 +63,7 @@ model = dict(
         streams=['rgb', 'lwir'],
         in_channels=[256, 512, 1024],
         out_channels=[256*2, 512*2, 1024*2],    # double channel
+        # out_channels=[256, 512, 1024],
         use_corrloss=False,
     ),
        
@@ -76,6 +71,8 @@ model = dict(
         type='YOLOXPAFPN', #neck的类别，见mmdet/models/neck/
         in_channels=[256*2, 512*2, 1024*2],   # double channel
         out_channels=256*2,
+        # in_channels=[256, 512, 1024],
+        # out_channels=256,
         num_csp_blocks=1,
     ),
 
@@ -83,10 +80,12 @@ model = dict(
         type='MultiSpeHead',
         use_cls_branch=True, #需要修改loss装饰器!
         num_classes=1,
-        in_channels=256*2,
+        in_channels=256*2,  # double channel
+        # in_channels=256,
         stacked_convs=4,
-        feat_channels=256,  # double channel
-        align='deform',
+        feat_channels=256,  
+        align='deform',   # ['star', 'border', 'deform', ]
+        # align='border',
         num_points = 25,
         offset_group=4,
         dcn_group=8,
@@ -95,6 +94,7 @@ model = dict(
                      eps=1e-16,
                      reduction='sum',
                      loss_weight=5.0),
+        # use_unpair_weights=True,
     ),
     init_cfg=dict(type='Pretrained', 
                   checkpoint='checkpoints/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth'
@@ -107,11 +107,13 @@ model = dict(
     ),
     test_cfg=dict(
         nms_pre=1000,   #nms前的box数
-        score_thr=0.01, # bbox的分数阈值
-        nms=dict(type='nms', iou_threshold=0.65),   #nms的配置
+        score_thr=0.1, # bbox的分数阈值 CVC-14
+        nms=dict(type='nms', iou_threshold=0.5),   #nms的配置0.65 cvc14
     )
 )
-optimizer=dict(type='SGD', lr=0.02, weight_decay=0.0005,momentum=0.9,
+optimizer=dict(type='SGD', 
+               lr=0.005, # cvc
+               weight_decay=0.0005,momentum=0.9,
                paramwise_cfg=dict(
                    custom_keys={
                        'backbone.CoCrossAttention_plugin_stage1':dict(lr_mult=0.)
@@ -138,13 +140,11 @@ lr_config = dict(
     warmup_by_epoch=True,
     warmup_ratio=0.0001,
     warmup_iters=2,
-    step=15,
-    # gamma=0.5,
+    step=14,
+    gamma=0.1,
     )
 
-# TODO:数据集需自定义--定义如何处理标注信息
-dataset_type = 'KaistDataset'   #数据集类型，考虑此处自定义dataloader
-data_root = '/dataset/KAIST/coco_kaist/'  #数据集的根路径
+
 img_norm_cfg = dict(
     mean = [88.358, 82.084, 72.471, 40.749, 40.749, 40.749],    #RGBT4通道均值    RGB=123.68, 116.779, 103.939, T=?
     std=[60.129, 57.758, 57.987, 20.732, 20.732, 20.732], #RGBT方差
@@ -152,8 +152,8 @@ img_norm_cfg = dict(
     to_rgb=False #输入网络的图像通道顺序
 )
 
-img_scale = (512, 640)
-
+img_scale = (640, 640)
+# img_scale = (480, 640)
 # classes = ('person', 'people', 'cyclist')
 
 
@@ -193,46 +193,47 @@ train_dataset = dict(
     type='MultiImageMixDataset',
     dataset=dict(
         type='GneralKaist',
-        ann_file='/data/kaist-paired/annotations/id_paired_annotations/train.json',
-        img_prefix='/data/kaist_dataset',
+        ann_file='/data/CVC-14/train.json',
+        img_prefix='/data/CVC-14/images',
         pipeline=[
             dict(type='LoadMultiModalImageFromFiles', to_float32=True),
             dict(type='LoadAnnotations', poly2mask=False),
             dict(type='Homography', mode='aug',
-                 transform='homo', delta=10
+                 transform='homo', delta=10,
+                 shift_bias=15
                  )
         ],
-        # filter_empty_gt=True,
+        # filter_unpaired_sample='set03',
     ),
     pipeline=train_pipeline,
     # dynamic_scale=img_scale
 )
 
-test_trans_type = 'shift'
+test_trans_type = 'stay'
 # test_points_pair = [[[0,0], [0,511], [639,0], [639,511]],     # 0.3272
 #                     [[4,-4], [4,516], [642,4], [642,507]]]
 # test_points_pair = [[[0,0], [0,511], [639,0], [639,511]],     # 0.2899
 #                     [[3,-4], [3,516], [641,4], [641,507]]]
 test_points_pair = [[[0,0], [0,511], [639,0], [639,511]],       # 0.2372
                     [[2,-3], [2,514], [641,3], [641,508]]]
-new_shifts  = [10, -10]
+new_shifts = [6, 0]
 
 # TODO:测试的流程1
 test_pipeline = [
     dict(type='LoadMultiModalImageFromFiles'), #prog.1:从文件路径加载图像
-    dict(type='Homography',
-         mode='test',
-         transform=test_trans_type,
-        #  points_pair=test_points_pair
-         shifts=new_shifts
-         ),
+    # dict(type='Homography',
+    #      mode='test',
+    #      transform=test_trans_type,
+    #     #  points_pair=test_points_pair
+    #      shifts=new_shifts
+    #      ),
     dict(
         type='MultiScaleFlipAug',
-        img_scale=img_scale,
+        img_scale=(480, 640),
         flip=False,
         transforms=[
-            dict(type='Resize_Multi', img_scale=img_scale, keep_ratio=True),
-            dict(type='RandomFlip'),  #demo时需注释
+            dict(type='Resize_Multi', img_scale=(480, 640), keep_ratio=True),
+            # dict(type='RandomFlip'),  #demo时需注释
             dict(type='Normalize', **img_norm_cfg),
             dict(type='Pad', size_divisor=32), #demo时需注释
             dict(type='ImageToTensor', keys=['img']),
@@ -240,6 +241,7 @@ test_pipeline = [
         ]),
 
 ]
+test_cvc14 = True
 # TODO:dataloader需自定义
 data = dict(
     samples_per_gpu=4,  #单个gpu的batch size
@@ -247,23 +249,25 @@ data = dict(
     train=train_dataset,
     val = dict(
         type='GneralKaist', #数据集的类型，同上train
-        ann_file='/data/kaist-paired/annotations/id_paired_annotations/test.json',
-        img_prefix='/data/kaist_dataset',
+        ann_file='/data/CVC-14/val.json',
+        img_prefix='/data/CVC-14/images',
+        test_cvc14=test_cvc14,
         pipeline=test_pipeline,
-        test_trans_dict=dict(type=test_trans_type, 
-                             points_pair=test_points_pair,
-                            #  shifts=shifts
-                             ),
+        # test_trans_dict=dict(type=test_trans_type, 
+        #                     #  points_pair=test_points_pair,
+        #                      shifts=new_shifts
+        #                      ),
     ),
     test = dict(
         type='GneralKaist', #数据集的类型，同上train
-        ann_file='/data/kaist-paired/annotations/id_paired_annotations/test.json',
-        img_prefix='/data/kaist_dataset',
+        ann_file='/data/CVC-14/val.json',
+        img_prefix='/data/CVC-14/images',
+        test_cvc14=test_cvc14,
         pipeline=test_pipeline,
-        test_trans_dict=dict(type=test_trans_type, 
-                            #  points_pair=test_points_pair,
-                             shifts=new_shifts
-                             ),
+        # test_trans_dict=dict(type=test_trans_type, 
+        #                     #  points_pair=test_points_pair,
+        #                      shifts=new_shifts
+        #                      ),
     ),
 )
 
@@ -271,7 +275,7 @@ data = dict(
 
 runner = dict(
     type='EpochBasedRunner',    #runner的类别
-    max_epochs=14
+    max_epochs=19
 )
 
 # find_unused_parameters=True
@@ -292,20 +296,21 @@ dist_params = dict(backend='nccl')  #用于设置分布式训练的参数，端�
 load_from = None    #从给定路径里加载模型作为预训练模型
 interval = 1
 resume_from = None  #从给定路径恢复checkpoints，训练模式将从checkpoints保存的位置开始训练
-# workflow = [('train', 1)]   #runner的工作流程，表示只有一个工作流且仅执行一次（根据前面的max_epochs训练12个回合）
+last_epochs=2
+workflow = [('train', 1)]   #runner的工作流程，表示只有一个工作流且仅执行一次（根据前面的max_epochs训练12个回合）
 # work_dir = 'outputs' #用于保存当前实验的模型checkpoint和log文件的地址
 
-evaluation = dict(
-    interval=interval, #验证间隔
-    metric=['bbox'],    #验证期间使用的指标
-)
+# evaluation = dict(
+#     interval=interval, #验证间隔
+#     metric=['bbox'],    #验证期间使用的指标
+# )
 
 checkpoint_config = dict(
     interval=1  #保存checkpoint的间隔
 )
 
 custom_hooks = [
-    dict(type='YOLOXModeSwitchHook', num_last_epochs=1, priority=48),
+    dict(type='YOLOXModeSwitchHook', num_last_epochs=last_epochs, priority=48),
     # dict(
     #     type='SyncRandomSizeHook',
     #     ratio_range=(14, 26),
@@ -314,7 +319,7 @@ custom_hooks = [
     #     priority=48),
     dict(
         type='SyncNormHook',
-        num_last_epochs=1,
+        num_last_epochs=last_epochs,
         interval=interval,
         priority=48),
     dict(type='ExpMomentumEMAHook', resume_from=resume_from, priority=49)

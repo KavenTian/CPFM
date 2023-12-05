@@ -37,7 +37,7 @@ def main():
     new_lines = []
     for line in lines:  # 217
         if 'new_shifts=[' in line.replace(' ', ''):
-            new_l = line.split('=')[0] + f' = {str(_list)}\n'
+            new_l = line.split('=')[0] + f'= {str(_list)}\n'
             new_lines.append(new_l)
         elif '..' in line:
             new_l = line.replace('..', 'configs')

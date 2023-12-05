@@ -12,7 +12,8 @@ class Homography:
                  transform='homo',
                  shifts=None,
                  points_pair=None,
-                 delta=8
+                 delta=8,
+                 shift_bias=1,
                  ):
         '''
         shifts:[d_x, d_y]
@@ -33,6 +34,9 @@ class Homography:
         self.mode = mode
         self.transform = transform
         self.delta = delta
+
+        self.shift_bias = shift_bias
+
         if self.transform == 'homo' and self.mode == 'test':
             srcp=np.array(points_pair[0], dtype=np.float64).reshape(-1, 1, 2)
             tgtp=np.array(points_pair[1], dtype=np.float64).reshape(-1, 1, 2)
@@ -47,7 +51,7 @@ class Homography:
             return results
         
         if self.mode == 'aug':
-            self.H = self.get_rand_H(self.delta)
+            self.H = self.get_rand_H(self.delta, self.shift_bias)
 
         f = getattr(self, f'{self.transform}_transform')
         results = f(results)
@@ -70,21 +74,20 @@ class Homography:
 
         # For Aug
         fore_bboxes = results['gt_bboxes'][1]   # tir bboxes [x1, y1, x2, y2]: (N, 4)
-        _bboxes = fore_bboxes.reshape(-1, 1, 2)
-        bboxes = cv2.perspectiveTransform(_bboxes, self.H).reshape(-1, 4)
-
-        bboxes[:, 0::2] = np.clip(bboxes[:, 0::2], 0, img_tir.shape[1])
-        bboxes[:, 1::2] = np.clip(bboxes[:, 1::2], 0, img_tir.shape[0])
+        if len(fore_bboxes) > 0:
+            _bboxes = fore_bboxes.reshape(-1, 1, 2)
+            bboxes = cv2.perspectiveTransform(_bboxes, self.H).reshape(-1, 4)
+            bboxes[:, 0::2] = np.clip(bboxes[:, 0::2], 0, img_tir.shape[1])
+            bboxes[:, 1::2] = np.clip(bboxes[:, 1::2], 0, img_tir.shape[0])
+            
+            # filter
+            valid_mask = (bboxes[:, 0] != bboxes[:, 2]) & (bboxes[:, 1] != bboxes[:, 3]) 
+            assert len(valid_mask) == len(bboxes)
+            bboxes = bboxes[valid_mask]
+            results['gt_bboxes'][1] = bboxes
+            results['local_person_ids'][1] = results['local_person_ids'][1][valid_mask]
+            results['gt_labels'][1] = results['gt_labels'][1][valid_mask]
         
-        # filter
-        valid_mask = (bboxes[:, 0] != bboxes[:, 2]) & (bboxes[:, 1] != bboxes[:, 3]) 
-        assert len(valid_mask) == len(bboxes)
-        bboxes = bboxes[valid_mask]
-        results['gt_bboxes'][1] = bboxes
-
-        results['local_person_ids'][1] = results['local_person_ids'][1][valid_mask]
-        results['gt_labels'][1] = results['gt_labels'][1][valid_mask]
-
         return results
 
     def shift_transform(self, results):
@@ -119,11 +122,13 @@ class Homography:
         return results
 
 
-    def get_rand_H(self, delta:int):
+    def get_rand_H(self, delta:int, shift_bias:int):
         if self.transform == 'homo':
             src_points = np.array([[0,0], [0,511], [639,0], [639,511]], dtype=np.float64).reshape(-1, 1, 2)
             noise = np.random.randint(-1 * delta, delta + 1, src_points.shape).astype(np.float64)
             tgt_points = src_points + noise
+            bias = np.random.randint(shift_bias)
+            tgt_points[:,:,:1] = tgt_points[:,:,:1] + bias
             H, _ = cv2.findHomography(src_points, tgt_points, 0)
         elif self.transform == 'shift':
             noise_x = np.random.randint(-1 * delta, delta + 1)

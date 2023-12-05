@@ -85,7 +85,9 @@ def single_gpu_test(model,
                 if out_dir:
                     if len(img_meta['ori_filename']) > 1:
                         path = img_meta['ori_filename'][0]
-                        path = path.split('/')[-1].replace('_visible', '')
+                        _s = [i for i, it in enumerate(path.split('/')) if 'set' in it]
+                        new_name = '_'.join(path.split('/')[_s[0]:])
+                        path = new_name.replace('_visible', '')
                         out_file = osp.join(out_dir, path)
                     else:
                         out_file = osp.join(out_dir, img_meta['ori_filename'])

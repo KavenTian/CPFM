@@ -1,1 +1,0 @@
-bash ./tools/dist_train_dist.sh configs/multispec_dist/yolox3lca_distill_yoloxl_kaist.py 4 

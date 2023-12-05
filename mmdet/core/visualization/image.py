@@ -139,7 +139,7 @@ def draw_labels(ax,
         label_text = class_names[
             label] if class_names is not None else f'class {label}'
         if scores is not None:
-            label_text += f'|{scores[i]:.02f}'
+            label_text += f': {scores[i]:.02f}'
         text_color = color[i] if isinstance(color, list) else color
 
         font_size_mask = font_size if scales is None else font_size * scales[i]
@@ -150,6 +150,7 @@ def draw_labels(ax,
             bbox={
                 'facecolor': 'black',
                 'alpha': 0.8,
+                # 'alpha': 0.,
                 'pad': 0.7,
                 'edgecolor': 'none'
             },

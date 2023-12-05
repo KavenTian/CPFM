@@ -49,10 +49,12 @@ class GneralKaist(CustomDataset):
                  choose_unpaired:str=None,         # only work in test time
                  file_client_args=dict(backend='disk'),
                  test_union=True,
-                 test_trans_dict: dict=None):
+                 test_trans_dict: dict=None,
+                 test_cvc14=None):
         
         self.filter_unpaired_sample = filter_unpaired_sample 
         self.choose_unpaired = choose_unpaired
+        self.test_cvc14 = test_cvc14
 
         super(GneralKaist, self).__init__(ann_file,
                                             pipeline,
@@ -64,7 +66,7 @@ class GneralKaist(CustomDataset):
                                             test_mode,
                                             filter_empty_gt,
                                             file_client_args)
-        if test_mode:
+        if test_mode and choose_unpaired:
             valid_inds = self.test_time_filter()
             self.data_infos = [self.data_infos[i] for i in valid_inds]
             if self.proposals is not None:
@@ -513,8 +515,10 @@ class GneralKaist(CustomDataset):
         union_json_results = []
         for idx in range(len(self)):
             img_id = self.img_ids[idx]
+            # anchor nms
             # rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, union_bboxes, anchor_scores\
             #      = results[idx]
+            #pair nms
             rgb_bboxes, tir_bboxes, rgb_ids, tir_ids, rgb_scores, tir_scores, _, anchor_scores\
                  = results[idx]
             # rgb
@@ -546,6 +550,7 @@ class GneralKaist(CustomDataset):
                     tir_json_results.append(data)
 
             # union
+            # pair nms
             for label in range(len(anchor_scores)):
                 anch_scores = anchor_scores[label]
                 rgb_bb = rgb_bboxes[label]
@@ -571,6 +576,7 @@ class GneralKaist(CustomDataset):
                     data['person_id'] = int(u_ids[i])
                     union_json_results.append(data)
             
+            # anchor nms
             # id = 0
             # for label in range(len(union_bboxes)):
             #     bboxes = union_bboxes[label]
@@ -675,6 +681,14 @@ class GneralKaist(CustomDataset):
         rgb_result_files, tir_result_files, union_result_files, tmp_dir = \
                                         self.format_results(results, jsonfile_prefix)
         
+        if self.test_cvc14:
+            if tmp_dir is not None:
+                tmp_dir.cleanup()
+            return dict()
+        
+        # IF NOT TEST LAMR
+        # return dict()
+
         self.mr_rgb, self.mr_tir, self.mr_union = self.evaluate_lamr(rgb_result_files['bbox'],
                                                         tir_result_files['bbox'],
                                                         union_result_files['bbox'],

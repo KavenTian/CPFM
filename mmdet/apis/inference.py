@@ -245,7 +245,7 @@ def show_result_pyplot(model,
         mask_color=palette)
 
 
-def inference_rgbt_detector(model, imgs):
+def inference_rgbt_detector(model, imgs, out_img=False):
     """Inference image(s) with the detector.
 
     Args:
@@ -284,7 +284,7 @@ def inference_rgbt_detector(model, imgs):
         # batch = torch.stack(batch_img, dim=0)
         # data['img'] = batch
 
-        datas.append(data)
+    datas.append(data)
 
     data = collate(datas, samples_per_gpu=1)
     # just get the actual data from DataContainer
@@ -304,7 +304,10 @@ def inference_rgbt_detector(model, imgs):
     with torch.no_grad():
         results = model(return_loss=False, rescale=True, **data)
     # print("inference time:", (time.time() - ta) * 1000, "ms")
-    return results[0]
+    if out_img:
+        return results[0], data['img']
+    else:
+        return results[0]
 
 def show_rgbt_result_pyplot(model,
                        img,
